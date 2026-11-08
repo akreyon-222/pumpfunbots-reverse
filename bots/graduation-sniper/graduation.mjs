@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../../lib/sim-guard.mjs";
 // Graduation Sniper: покупает токены перед graduation (миграцией с bonding curve на PumpSwap AMM)
 //
 // Стратегия: мониторит bonding curve reserves из V3 trade events.
@@ -43,6 +44,12 @@ import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
 import { loadKeypair } from "../../lib/wallet.mjs";
 import { SolanaWs } from "../../lib/ws.mjs";
+import {
+  parseV3TradeEvent,
+  getFillPct,
+  VIRTUAL_SOL_AT_GRADUATION,
+} from "./v3-parse.mjs";
+import { SIMULATION_ONLY, logUtcPlus3 } from "../../lib/sim-guard.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
@@ -54,8 +61,6 @@ const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const POLL_MS = 3000;
 const DRY_RUN = process.argv.includes("--dry-run");
 
-const VIRTUAL_SOL_AT_GRADUATION = 85_000_000_000n;
-
 const wallet = loadKeypair();
 const positions = new Map();
 const watchlist = new Map();
@@ -65,28 +70,8 @@ let totalTrades = 0;
 let wins = 0;
 
 function log(msg) {
-  console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
-}
-
-function parseV3TradeEvent(data) {
-  if (data.length < 129) return null;
-  const mint = new PublicKey(data.subarray(8, 40)).toBase58();
-  const solAmount = Number(data.readBigUInt64LE(40)) / 1e9;
-  const tokenAmount = Number(data.readBigUInt64LE(48)) / 1e6;
-  const user = new PublicKey(data.subarray(57, 89)).toBase58();
-  const virtualSolReserves = data.readBigUInt64LE(97);
-  const virtualTokenReserves = data.readBigUInt64LE(105);
-  const realSolReserves = data.readBigUInt64LE(113);
-  const realTokenReserves = data.readBigUInt64LE(121);
-  return {
-    mint, solAmount, tokenAmount, user,
-    virtualSolReserves, virtualTokenReserves,
-    realSolReserves, realTokenReserves,
-  };
-}
-
-function getFillPct(virtualSolReserves) {
-  return (Number(virtualSolReserves) / Number(VIRTUAL_SOL_AT_GRADUATION)) * 100;
+  const tag = SIMULATION_ONLY ? "PAPER" : "LIVE";
+  logUtcPlus3(tag, msg);
 }
 
 async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves) {
@@ -228,7 +213,8 @@ setInterval(monitorPositions, POLL_MS);
 
 // Main
 log("=== GRADUATION SNIPER ===");
-log(`Wallet: ${wallet.publicKey.toBase58()}`);
+log(`commit=${process.env.GIT_SHA || "local"} source=${process.env.RPC_URL || "https://api.mainnet-beta.solana.com"}`);
+log(`Wallet: ${wallet.publicKey.toBase58()}${SIMULATION_ONLY ? " (ephemeral dummy, unfunded)" : ""}`);
 log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s`);
 if (DRY_RUN) log("MODE: DRY RUN (no real transactions)");
