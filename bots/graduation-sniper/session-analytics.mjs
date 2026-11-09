@@ -25,8 +25,21 @@ export class SessionAnalytics {
     this._append("BUY", mint, fillPct, velocity, "", "", `price=${entryPrice}`);
   }
 
-  recordSell(mint, fillPct, velocity, pnlPct, exitType, holdSec) {
-    this._append("SELL", mint, fillPct, velocity, pnlPct, exitType, `hold_sec=${holdSec}`);
+  recordSell(mint, fillPct, velocity, pnlPct, exitType, holdSec, extra = "") {
+    const tail = extra ? `hold_sec=${holdSec};${extra}` : `hold_sec=${holdSec}`;
+    this._append("SELL", mint, fillPct, velocity, pnlPct, exitType, tail);
+  }
+
+  recordTradeClose(mint, fillPct, tradePnlSol, tradeClass) {
+    this._append(
+      "TRADE",
+      mint,
+      fillPct,
+      "",
+      (tradePnlSol >= 0 ? "+" : "") + tradePnlSol.toFixed(4),
+      tradeClass,
+      `pnl_sol=${tradePnlSol.toFixed(6)}`,
+    );
   }
 
   _append(kind, mint, fillPct, velocity, pnlPct, exitType, extra) {

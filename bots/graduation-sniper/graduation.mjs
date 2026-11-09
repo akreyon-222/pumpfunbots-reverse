@@ -15,7 +15,9 @@ import "../../lib/sim-guard.mjs";
 // Конфиг через ENV или .env:
 //   GRAD_BUY_SOL=0.1              — сумма покупки
 //   GRAD_MIN_FILL_PCT=92          — минимальный % заполнения для покупки
-//   GRAD_TAKE_PROFIT=1.5          — продать при 1.5x
+//   GRAD_TAKE_PROFIT=1.5          — продать при 1.5x (legacy single TP)
+//   GRAD_TP2=1.6                  — tiered: enable partial exits + TP2
+//   GRAD_TP1=1.2 / GRAD_TP1_FRACTION=0.5 — tiered first take
 //   GRAD_STOP_LOSS=0.7            — стоп-лосс при 0.7x
 //   GRAD_TIMEOUT_SEC=300          — таймаут позиции (5 мин)
 //   GRAD_MAX_POSITIONS=3          — макс. позиций
@@ -54,12 +56,20 @@ import {
 import { SIMULATION_ONLY, logUtcPlus3 } from "../../lib/sim-guard.mjs";
 import { readFilterConfig, evaluateEntry } from "./entry-filters.mjs";
 import { SessionAnalytics } from "./session-analytics.mjs";
+import {
+  readExitConfig,
+  createPosition,
+  legPnlSol,
+  classifyTrade,
+  EPS,
+} from "./exit-strategy.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
-const TAKE_PROFIT = Number(process.env.GRAD_TAKE_PROFIT || 1.5);
-const STOP_LOSS = Number(process.env.GRAD_STOP_LOSS || 0.7);
-const TIMEOUT_SEC = Number(process.env.GRAD_TIMEOUT_SEC || 300);
+const exitCfg = readExitConfig();
+const TAKE_PROFIT = exitCfg.takeProfit;
+const STOP_LOSS = exitCfg.stopLoss;
+const TIMEOUT_SEC = exitCfg.timeoutSec;
 const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const POLL_MS = 3000;
@@ -123,12 +133,18 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
   st.buys++;
 
   if (DRY_RUN) {
-    positions.set(mint, {
-      entryPrice,
-      entryTime: Date.now(),
-      fillAtEntry: fillPct,
-      velocityAtEntry: velocity,
-    });
+    positions.set(
+      mint,
+      createPosition(
+        {
+          entryPrice,
+          entryTime: Date.now(),
+          fillAtEntry: fillPct,
+          velocityAtEntry: velocity,
+        },
+        exitCfg.tiered,
+      ),
+    );
     analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  [DRY RUN] position tracked`);
@@ -152,18 +168,65 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
     ];
     const tx = await buildVersionedTx(wallet, ixs);
     await sendTxWithRetry(tx, { skipPreflight: true });
-    positions.set(mint, {
-      entryPrice,
-      entryTime: Date.now(),
-      fillAtEntry: fillPct,
-      velocityAtEntry: velocity,
-    });
+    positions.set(
+      mint,
+      createPosition(
+        {
+          entryPrice,
+          entryTime: Date.now(),
+          fillAtEntry: fillPct,
+          velocityAtEntry: velocity,
+        },
+        exitCfg.tiered,
+      ),
+    );
     analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  bought!`);
   } catch (err) {
     log(`  buy failed: ${err.message}`);
   }
+}
+
+function holdSec(pos) {
+  return ((Date.now() - pos.entryTime) / 1000).toFixed(1);
+}
+
+async function paperSellLeg(mint, pos, fraction, pnlMult, exitType) {
+  const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
+  const pnlSol = legPnlSol(BUY_SOL, fraction, pnlMult);
+  pos.tradePnlSol += pnlSol;
+  pos.remainingFraction -= fraction;
+  pos.legs.push({ exitType, pnl: pnlSol, fraction, pnlMult });
+  totalPnl += pnlSol;
+  analytics?.recordSell(
+    mint,
+    pos.fillAtEntry,
+    pos.velocityAtEntry,
+    pnlPct,
+    exitType,
+    holdSec(pos),
+    `fraction=${fraction};pnl_sol=${pnlSol.toFixed(6)}`,
+  );
+  log(
+    `  [DRY RUN] leg ${exitType}: ${fraction * 100}% @ ${pnlMult.toFixed(3)}x ` +
+      `(${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`,
+  );
+}
+
+function closePaperTrade(mint, pos) {
+  const tradeWin = pos.tradePnlSol > EPS;
+  totalTrades++;
+  if (tradeWin) wins++;
+  const tradeClass = classifyTrade(pos.legs);
+  analytics?.recordTradeClose(mint, pos.fillAtEntry, pos.tradePnlSol, tradeClass);
+  if (pos.legs.some((l) => l.exitType === "stop_loss")) statsFor(mint).lastSlAt = Date.now();
+  log(
+    `  [DRY RUN] trade closed: ${tradeClass} total=${pos.tradePnlSol >= 0 ? "+" : ""}${pos.tradePnlSol.toFixed(4)} SOL ` +
+      `(${tradeWin ? "W" : "L"})`,
+  );
+  log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  positions.delete(mint);
 }
 
 async function checkExit(mint) {
@@ -188,6 +251,36 @@ async function checkExit(mint) {
     const currentPrice = getPrice(state);
     const pnlMult = currentPrice / pos.entryPrice;
 
+    if (exitCfg.tiered) {
+      if (!DRY_RUN) return;
+      if (!pos.tp1Done && pnlMult >= exitCfg.tp1) {
+        log(`  ${mint.slice(0, 12)}: TP1 ${exitCfg.tp1}x — sell ${(exitCfg.tp1Fraction * 100).toFixed(0)}%`);
+        await paperSellLeg(mint, pos, exitCfg.tp1Fraction, pnlMult, "tp1");
+        pos.tp1Done = true;
+      }
+      if (pos.tp1Done && pos.remainingFraction > EPS && pnlMult >= exitCfg.tp2) {
+        log(`  ${mint.slice(0, 12)}: TP2 ${exitCfg.tp2}x — sell rest`);
+        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "tp2");
+        closePaperTrade(mint, pos);
+        return;
+      }
+      if (pos.remainingFraction > EPS && pnlMult <= STOP_LOSS) {
+        log(`  ${mint.slice(0, 12)}: SL ${STOP_LOSS}x on remaining`);
+        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "stop_loss");
+        closePaperTrade(mint, pos);
+        return;
+      }
+      if (pos.remainingFraction > EPS && elapsed >= TIMEOUT_SEC) {
+        log(
+          `  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s on remaining, pnl=${((pnlMult - 1) * 100).toFixed(1)}%`,
+        );
+        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "timeout");
+        closePaperTrade(mint, pos);
+        return;
+      }
+      return;
+    }
+
     if (pnlMult >= TAKE_PROFIT) {
       log(`  ${mint.slice(0, 12)}: TP hit ${((pnlMult - 1) * 100).toFixed(1)}%`);
       await sellPosition(mint, mintPk, pos, pnlMult, "take_profit");
@@ -204,12 +297,12 @@ async function checkExit(mint) {
 async function sellPosition(mint, mintPk, pos, pnlMult, exitType = "unknown") {
   const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
   const pnlSol = BUY_SOL * (pnlMult - 1);
-  const holdSec = ((Date.now() - pos.entryTime) / 1000).toFixed(1);
+  const hold = holdSec(pos);
 
   if (DRY_RUN) {
     totalTrades++;
     totalPnl += pnlSol;
-    if (pnlMult > 1) wins++;
+    if (pnlSol > EPS) wins++;
     if (pnlMult <= STOP_LOSS) statsFor(mint).lastSlAt = Date.now();
     analytics?.recordSell(
       mint,
@@ -217,8 +310,9 @@ async function sellPosition(mint, mintPk, pos, pnlMult, exitType = "unknown") {
       pos.velocityAtEntry,
       pnlPct,
       exitType,
-      holdSec,
+      hold,
     );
+    analytics?.recordTradeClose(mint, pos.fillAtEntry, pnlSol, exitType);
     log(`  [DRY RUN] sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
     log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
     positions.delete(mint);
@@ -272,7 +366,15 @@ setInterval(monitorPositions, POLL_MS);
 log("=== GRADUATION SNIPER ===");
 log(`commit=${process.env.GIT_SHA || "local"} source=${process.env.RPC_URL || "https://api.mainnet-beta.solana.com"}`);
 log(`Wallet: ${wallet.publicKey.toBase58()}${SIMULATION_ONLY ? " (ephemeral dummy, unfunded)" : ""}`);
-log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
+if (exitCfg.tiered) {
+  log(
+    `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
+      `TP1=${exitCfg.tp1}x@${(exitCfg.tp1Fraction * 100).toFixed(0)}% TP2=${exitCfg.tp2}x rest, ` +
+      `SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`,
+  );
+} else {
+  log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
+}
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s`);
 if (filterCfg.enabled) {
   log(
