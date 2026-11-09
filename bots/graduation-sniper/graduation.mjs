@@ -62,6 +62,7 @@ import {
   legPnlSol,
   classifyTrade,
   decideTieredExit,
+  decidePullbackFloorExit,
   EPS,
 } from "./exit-strategy.mjs";
 
@@ -143,7 +144,7 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
           fillAtEntry: fillPct,
           velocityAtEntry: velocity,
         },
-        exitCfg.tiered,
+        exitCfg,
       ),
     );
     analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
@@ -178,7 +179,7 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
           fillAtEntry: fillPct,
           velocityAtEntry: velocity,
         },
-        exitCfg.tiered,
+        exitCfg,
       ),
     );
     analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
@@ -221,7 +222,11 @@ function closePaperTrade(mint, pos) {
   if (tradeWin) wins++;
   const tradeClass = classifyTrade(pos.legs);
   analytics?.recordTradeClose(mint, pos.fillAtEntry, pos.tradePnlSol, tradeClass);
-  if (pos.legs.some((l) => l.exitType === "stop_loss" || l.exitType === "tp1_floor")) {
+  if (
+    pos.legs?.some((l) =>
+      ["stop_loss", "tp1_floor", "floor_pullback"].includes(l.exitType),
+    )
+  ) {
     statsFor(mint).lastSlAt = Date.now();
   }
   log(
@@ -285,6 +290,33 @@ async function checkExit(mint) {
       }
       await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, decision.exitType);
       if (decision.action === "close") closePaperTrade(mint, pos);
+      return;
+    }
+
+    if (exitCfg.pullbackFloor) {
+      if (!DRY_RUN) return;
+      const decision = decidePullbackFloorExit(pos, pnlMult, elapsed, {
+        ...exitCfg,
+        stopLoss: STOP_LOSS,
+        timeoutSec: TIMEOUT_SEC,
+      });
+      if (!decision) return;
+      if (decision.action === "arm_only") {
+        if (!pos.sawAboveArm) {
+          pos.sawAboveArm = true;
+          log(`  ${mint.slice(0, 12)}: floor arm >${exitCfg.floorArmLevel}x (pullback exit<=${exitCfg.floorExitLevel}x)`);
+        }
+        return;
+      }
+      const labels = {
+        take_profit: `TP ${TAKE_PROFIT}x full`,
+        floor_pullback: `floor pullback @ ${decision.pnlMult.toFixed(3)}x`,
+        stop_loss: `SL ${STOP_LOSS}x`,
+        timeout: `timeout ${elapsed.toFixed(0)}s`,
+      };
+      log(`  ${mint.slice(0, 12)}: ${labels[decision.exitType] || decision.exitType}`);
+      await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, decision.exitType);
+      closePaperTrade(mint, pos);
       return;
     }
 
@@ -379,6 +411,12 @@ if (exitCfg.tiered) {
       `TP1=${exitCfg.tp1}x@${(exitCfg.tp1Fraction * 100).toFixed(0)}% TP2=${exitCfg.tp2}x rest, ` +
       `afterTP1 floor<${exitCfg.tp1}x${exitCfg.floorProtect ? " on" : " off"}, ` +
       `SL=${STOP_LOSS}x pre-TP1, timeout=${TIMEOUT_SEC}s`,
+  );
+} else if (exitCfg.pullbackFloor) {
+  log(
+    `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
+      `TP=${TAKE_PROFIT}x full, arm>${exitCfg.floorArmLevel}x pullback<=${exitCfg.floorExitLevel}x, ` +
+      `SL=${STOP_LOSS}x if never armed, timeout=${TIMEOUT_SEC}s`,
   );
 } else {
   log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);

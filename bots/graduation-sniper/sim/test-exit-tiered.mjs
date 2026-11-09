@@ -27,10 +27,16 @@ function assert(cond, msg) {
   if (!cond) failures.push(msg);
 }
 
+const tieredCfg = readExitConfig({
+  GRAD_TP2: "1.6",
+  GRAD_TP1: "1.2",
+  GRAD_TP1_FRACTION: "0.5",
+});
+
 function posTiered() {
   return createPosition(
     { entryPrice: 1, entryTime: Date.now(), fillAtEntry: 95, velocityAtEntry: 0.05 },
-    true,
+    tieredCfg,
   );
 }
 
