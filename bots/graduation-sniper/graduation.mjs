@@ -61,6 +61,7 @@ import {
   createPosition,
   legPnlSol,
   classifyTrade,
+  decideTieredExit,
   EPS,
 } from "./exit-strategy.mjs";
 
@@ -220,7 +221,9 @@ function closePaperTrade(mint, pos) {
   if (tradeWin) wins++;
   const tradeClass = classifyTrade(pos.legs);
   analytics?.recordTradeClose(mint, pos.fillAtEntry, pos.tradePnlSol, tradeClass);
-  if (pos.legs.some((l) => l.exitType === "stop_loss")) statsFor(mint).lastSlAt = Date.now();
+  if (pos.legs.some((l) => l.exitType === "stop_loss" || l.exitType === "tp1_floor")) {
+    statsFor(mint).lastSlAt = Date.now();
+  }
   log(
     `  [DRY RUN] trade closed: ${tradeClass} total=${pos.tradePnlSol >= 0 ? "+" : ""}${pos.tradePnlSol.toFixed(4)} SOL ` +
       `(${tradeWin ? "W" : "L"})`,
@@ -250,34 +253,38 @@ async function checkExit(mint) {
 
     const currentPrice = getPrice(state);
     const pnlMult = currentPrice / pos.entryPrice;
+    pos.lastPnlMult = pnlMult;
+    pos.lastObservedAt = Date.now();
 
     if (exitCfg.tiered) {
       if (!DRY_RUN) return;
-      if (!pos.tp1Done && pnlMult >= exitCfg.tp1) {
-        log(`  ${mint.slice(0, 12)}: TP1 ${exitCfg.tp1}x — sell ${(exitCfg.tp1Fraction * 100).toFixed(0)}%`);
-        await paperSellLeg(mint, pos, exitCfg.tp1Fraction, pnlMult, "tp1");
+      const decision = decideTieredExit(pos, pnlMult, elapsed, {
+        ...exitCfg,
+        stopLoss: STOP_LOSS,
+        timeoutSec: TIMEOUT_SEC,
+      });
+      if (!decision) return;
+      if (decision.action === "tp1") {
+        log(`  ${mint.slice(0, 12)}: TP1 ${exitCfg.tp1}x — sell ${(decision.fraction * 100).toFixed(0)}%`);
+        await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, "tp1");
         pos.tp1Done = true;
-      }
-      if (pos.tp1Done && pos.remainingFraction > EPS && pnlMult >= exitCfg.tp2) {
-        log(`  ${mint.slice(0, 12)}: TP2 ${exitCfg.tp2}x — sell rest`);
-        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "tp2");
-        closePaperTrade(mint, pos);
         return;
       }
-      if (pos.remainingFraction > EPS && pnlMult <= STOP_LOSS) {
-        log(`  ${mint.slice(0, 12)}: SL ${STOP_LOSS}x on remaining`);
-        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "stop_loss");
-        closePaperTrade(mint, pos);
-        return;
-      }
-      if (pos.remainingFraction > EPS && elapsed >= TIMEOUT_SEC) {
+      if (decision.exitType === "tp1_floor") {
         log(
-          `  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s on remaining, pnl=${((pnlMult - 1) * 100).toFixed(1)}%`,
+          `  ${mint.slice(0, 12)}: floor protect <${exitCfg.tp1}x — sell rest @ ${decision.pnlMult.toFixed(3)}x`,
         );
-        await paperSellLeg(mint, pos, pos.remainingFraction, pnlMult, "timeout");
-        closePaperTrade(mint, pos);
-        return;
+      } else if (decision.exitType === "tp2") {
+        log(`  ${mint.slice(0, 12)}: TP2 ${exitCfg.tp2}x — sell rest`);
+      } else if (decision.exitType === "stop_loss") {
+        log(`  ${mint.slice(0, 12)}: SL ${STOP_LOSS}x${pos.tp1Done ? " on remainder" : ""}`);
+      } else if (decision.exitType === "timeout") {
+        log(
+          `  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s, mult=${decision.pnlMult.toFixed(3)}x`,
+        );
       }
+      await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, decision.exitType);
+      if (decision.action === "close") closePaperTrade(mint, pos);
       return;
     }
 
@@ -370,7 +377,8 @@ if (exitCfg.tiered) {
   log(
     `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
       `TP1=${exitCfg.tp1}x@${(exitCfg.tp1Fraction * 100).toFixed(0)}% TP2=${exitCfg.tp2}x rest, ` +
-      `SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`,
+      `afterTP1 floor<${exitCfg.tp1}x${exitCfg.floorProtect ? " on" : " off"}, ` +
+      `SL=${STOP_LOSS}x pre-TP1, timeout=${TIMEOUT_SEC}s`,
   );
 } else {
   log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
@@ -475,7 +483,8 @@ process.on("SIGINT", () => {
   log(`  Watchlist: ${watchlist.size} tokens tracked`);
   log(`  Open positions: ${positions.size}`);
   for (const [mint, pos] of positions) {
-    log(`    ${mint.slice(0, 12)} fill@entry=${pos.fillAtEntry.toFixed(1)}%`);
+    const mult = pos.lastPnlMult != null ? ` last_mult=${pos.lastPnlMult.toFixed(3)}x` : "";
+    log(`    ${mint.slice(0, 12)} fill@entry=${pos.fillAtEntry.toFixed(1)}%${mult}`);
   }
   ws.close();
   process.exit(0);

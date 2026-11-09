@@ -1,59 +1,123 @@
 #!/usr/bin/env node
-/** Synthetic tiered exit math — not profit evidence */
+/** Synthetic tiered + floor protect — not profit evidence */
 import {
   legPnlSol,
   classifyTrade,
   createPosition,
+  decideTieredExit,
+  readExitConfig,
   EPS,
 } from "../exit-strategy.mjs";
 
 const BUY = 0.1;
-let failures = [];
+const cfg = {
+  ...readExitConfig({
+    GRAD_TP2: "1.6",
+    GRAD_TP1: "1.2",
+    GRAD_TP1_FRACTION: "0.5",
+    GRAD_STOP_LOSS: "0.7",
+    GRAD_TIMEOUT_SEC: "300",
+  }),
+  stopLoss: 0.7,
+  timeoutSec: 300,
+};
+const failures = [];
 
 function assert(cond, msg) {
   if (!cond) failures.push(msg);
 }
 
-// TP1 then TP2
+function posTiered() {
+  return createPosition(
+    { entryPrice: 1, entryTime: Date.now(), fillAtEntry: 95, velocityAtEntry: 0.05 },
+    true,
+  );
+}
+
+// Exact 1.2 at TP1 — no same-tick floor (tp1 first)
 {
-  const legs = [];
-  const f1 = 0.5;
-  const f2 = 0.5;
-  legs.push({ exitType: "tp1", pnl: legPnlSol(BUY, f1, 1.25) });
-  legs.push({ exitType: "tp2", pnl: legPnlSol(BUY, f2, 1.65) });
-  const total = legs.reduce((s, l) => s + l.pnl, 0);
-  assert(classifyTrade(legs) === "tp1_then_tp2", "classify tp1_tp2");
-  assert(Math.abs(total - 0.045) < 0.0001, `tp1+tp2 total ${total}`);
+  const p = posTiered();
+  const d = decideTieredExit(p, 1.2, 10, cfg);
+  assert(d?.action === "tp1", "at 1.2x trigger tp1");
+  assert(d?.exitType !== "tp1_floor", "1.2 is tp1 not floor");
+}
+
+// After TP1, 1.2 exactly — no floor (strict <)
+{
+  const p = posTiered();
+  p.tp1Done = true;
+  p.remainingFraction = 0.5;
+  assert(decideTieredExit(p, 1.2, 20, cfg) === null, "at exactly 1.2 after tp1 hold");
+}
+
+// After TP1, below 1.2 — floor at observed
+{
+  const p = posTiered();
+  p.tp1Done = true;
+  p.remainingFraction = 0.5;
+  const d = decideTieredExit(p, 1.15, 25, cfg);
+  assert(d?.exitType === "tp1_floor" && d.pnlMult === 1.15, "floor uses observed 1.15");
+}
+
+// Gap down after TP1
+{
+  const p = posTiered();
+  p.tp1Done = true;
+  p.remainingFraction = 0.5;
+  const d = decideTieredExit(p, 0.85, 30, cfg);
+  assert(d?.exitType === "tp1_floor", "gap below 1.2 uses floor not pre-sl 0.7");
+}
+
+// TP2 path
+{
+  const p = posTiered();
+  p.tp1Done = true;
+  p.remainingFraction = 0.5;
+  const d = decideTieredExit(p, 1.65, 40, cfg);
+  assert(d?.exitType === "tp2", "tp2 at 1.65");
 }
 
 // SL before TP1
 {
-  const legs = [{ exitType: "stop_loss", pnl: legPnlSol(BUY, 1, 0.65) }];
-  assert(classifyTrade(legs) === "sl_before_tp1", "sl before tp1");
-  assert(Math.abs(legs[0].pnl + 0.035) < 0.0001, "full sl pnl");
+  const p = posTiered();
+  const d = decideTieredExit(p, 0.65, 5, cfg);
+  assert(d?.exitType === "stop_loss" && d.fraction === 1, "full sl before tp1");
 }
 
-// TP1 then SL on rest
+// Timeout before TP1
+{
+  const p = posTiered();
+  const d = decideTieredExit(p, 0.95, 301, cfg);
+  assert(d?.exitType === "timeout", "timeout before tp1");
+}
+
+// Double-count: one decision per call
+{
+  const p = posTiered();
+  const d = decideTieredExit(p, 1.25, 10, cfg);
+  assert(d && !d.exitType.includes(","), "single action");
+}
+
+// Classify floor protect
 {
   const legs = [
     { exitType: "tp1", pnl: legPnlSol(BUY, 0.5, 1.22) },
-    { exitType: "stop_loss", pnl: legPnlSol(BUY, 0.5, 0.68) },
+    { exitType: "tp1_floor", pnl: legPnlSol(BUY, 0.5, 1.1) },
   ];
-  const total = legs.reduce((s, l) => s + l.pnl, 0);
-  assert(classifyTrade(legs) === "tp1_then_sl_or_timeout", "tp1 then sl");
-  assert(total < 0, "tp1+sl can be net negative");
+  assert(classifyTrade(legs) === "tp1_then_floor_protect", "classify floor");
 }
 
+// TP1+tp2 classify unchanged
 {
-  const pos = createPosition(
-    { entryPrice: 1, entryTime: Date.now(), fillAtEntry: 95, velocityAtEntry: 0.1 },
-    true,
-  );
-  assert(pos.remainingFraction === 1 && pos.tp1Done === false, "tiered position init");
+  const legs = [
+    { exitType: "tp1", pnl: 1 },
+    { exitType: "tp2", pnl: 1 },
+  ];
+  assert(classifyTrade(legs) === "tp1_then_tp2", "tp2 class");
 }
 
 if (failures.length) {
   console.error("FAIL:", failures);
   process.exit(1);
 }
-console.log("OK tiered exit fixture tests");
+console.log("OK tiered floor exit tests");
