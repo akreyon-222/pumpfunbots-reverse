@@ -20,6 +20,8 @@ import "../../lib/sim-guard.mjs";
 //   GRAD_TIMEOUT_SEC=300          — таймаут позиции (5 мин)
 //   GRAD_MAX_POSITIONS=3          — макс. позиций
 //   GRAD_COOLDOWN_SEC=30          — пауза между покупками
+//   GRAD_FILTERS=1                — watchlist momentum / re-entry filters (see entry-filters.mjs)
+//   GRAD_ANALYTICS_CSV=...        — session CSV (default in --dry-run)
 
 import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -50,6 +52,8 @@ import {
   VIRTUAL_SOL_AT_GRADUATION,
 } from "./v3-parse.mjs";
 import { SIMULATION_ONLY, logUtcPlus3 } from "../../lib/sim-guard.mjs";
+import { readFilterConfig, evaluateEntry } from "./entry-filters.mjs";
+import { SessionAnalytics } from "./session-analytics.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
@@ -60,11 +64,37 @@ const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const POLL_MS = 3000;
 const DRY_RUN = process.argv.includes("--dry-run");
+const filterCfg = readFilterConfig();
+const analyticsCsv =
+  process.env.GRAD_ANALYTICS_CSV ||
+  (DRY_RUN ? "/opt/cursor/artifacts/graduation-session.csv" : "");
+const analytics = analyticsCsv ? new SessionAnalytics(analyticsCsv) : null;
 
 const wallet = loadKeypair();
 const positions = new Map();
 const watchlist = new Map();
+const mintStats = new Map();
 let lastBuyTime = 0;
+
+function statsFor(mint) {
+  if (!mintStats.has(mint)) mintStats.set(mint, { buys: 0, lastSlAt: 0 });
+  return mintStats.get(mint);
+}
+
+function pushWatchSample(mint, fillPct, virtualSolReserves) {
+  const now = Date.now();
+  const vSol = Number(virtualSolReserves) / 1e9;
+  let row = watchlist.get(mint);
+  if (!row) {
+    row = { fillPct, vSol, ts: now, history: [] };
+    watchlist.set(mint, row);
+  }
+  row.fillPct = fillPct;
+  row.vSol = vSol;
+  row.ts = now;
+  row.history.push({ fillPct, vSol, ts: now });
+  if (row.history.length > 40) row.history.shift();
+}
 let totalPnl = 0;
 let totalTrades = 0;
 let wins = 0;
@@ -74,7 +104,7 @@ function log(msg) {
   logUtcPlus3(tag, msg);
 }
 
-async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves) {
+async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves, velocity = null) {
   if (positions.size >= MAX_POSITIONS) return;
   if (positions.has(mint)) return;
   if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
@@ -84,11 +114,22 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves)
 
   log(`*** PRE-GRADUATION BUY ***`);
   log(`  mint: ${mint}`);
-  log(`  fill: ${fillPct.toFixed(1)}% | price: ${entryPrice.toFixed(12)} SOL/token`);
+  log(
+    `  fill: ${fillPct.toFixed(1)}% | vel=${velocity !== null ? `${velocity.toFixed(3)}%/s` : "n/a"} | price: ${entryPrice.toFixed(12)} SOL/token`,
+  );
   log(`  buying ${BUY_SOL} SOL`);
 
+  const st = statsFor(mint);
+  st.buys++;
+
   if (DRY_RUN) {
-    positions.set(mint, { entryPrice, entryTime: Date.now(), fillAtEntry: fillPct });
+    positions.set(mint, {
+      entryPrice,
+      entryTime: Date.now(),
+      fillAtEntry: fillPct,
+      velocityAtEntry: velocity,
+    });
+    analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  [DRY RUN] position tracked`);
     return;
@@ -111,7 +152,13 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves)
     ];
     const tx = await buildVersionedTx(wallet, ixs);
     await sendTxWithRetry(tx, { skipPreflight: true });
-    positions.set(mint, { entryPrice, entryTime: Date.now(), fillAtEntry: fillPct });
+    positions.set(mint, {
+      entryPrice,
+      entryTime: Date.now(),
+      fillAtEntry: fillPct,
+      velocityAtEntry: velocity,
+    });
+    analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  bought!`);
   } catch (err) {
@@ -143,25 +190,35 @@ async function checkExit(mint) {
 
     if (pnlMult >= TAKE_PROFIT) {
       log(`  ${mint.slice(0, 12)}: TP hit ${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "take_profit");
     } else if (pnlMult <= STOP_LOSS) {
       log(`  ${mint.slice(0, 12)}: SL hit ${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "stop_loss");
     } else if (elapsed >= TIMEOUT_SEC) {
       log(`  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s, pnl=${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "timeout");
     }
   } catch {}
 }
 
-async function sellPosition(mint, mintPk, pos, pnlMult) {
+async function sellPosition(mint, mintPk, pos, pnlMult, exitType = "unknown") {
   const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
   const pnlSol = BUY_SOL * (pnlMult - 1);
+  const holdSec = ((Date.now() - pos.entryTime) / 1000).toFixed(1);
 
   if (DRY_RUN) {
     totalTrades++;
     totalPnl += pnlSol;
     if (pnlMult > 1) wins++;
+    if (pnlMult <= STOP_LOSS) statsFor(mint).lastSlAt = Date.now();
+    analytics?.recordSell(
+      mint,
+      pos.fillAtEntry,
+      pos.velocityAtEntry,
+      pnlPct,
+      exitType,
+      holdSec,
+    );
     log(`  [DRY RUN] sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
     log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
     positions.delete(mint);
@@ -217,6 +274,13 @@ log(`commit=${process.env.GIT_SHA || "local"} source=${process.env.RPC_URL || "h
 log(`Wallet: ${wallet.publicKey.toBase58()}${SIMULATION_ONLY ? " (ephemeral dummy, unfunded)" : ""}`);
 log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s`);
+if (filterCfg.enabled) {
+  log(
+    `Filters: maxFill=${filterCfg.maxFillPct}% minVel=${filterCfg.minFillVelocityPctPerSec}%/s ` +
+      `highFill>=${filterCfg.highFillPct}% needVel=${filterCfg.highFillMinVelocity} maxBuys/mint=${filterCfg.maxBuysPerMint}`,
+  );
+} else log("Filters: off (GRAD_FILTERS=0)");
+if (analyticsCsv) log(`Analytics CSV: ${analyticsCsv}`);
 if (DRY_RUN) log("MODE: DRY RUN (no real transactions)");
 
 const ws = new SolanaWs();
@@ -249,13 +313,37 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
 
       if (fillPct >= MIN_FILL_PCT && fillPct < 100) {
         const prev = watchlist.get(ev.mint);
-        if (!prev || fillPct > prev.fillPct) {
-          watchlist.set(ev.mint, { fillPct, ts: Date.now() });
+        const isNewHigh = !prev || fillPct > prev.fillPct;
+        pushWatchSample(ev.mint, fillPct, ev.virtualSolReserves);
+        if (isNewHigh) {
           log(`WATCHLIST: ${ev.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% vSol=${(Number(ev.virtualSolReserves) / 1e9).toFixed(2)}`);
         }
 
         if (!positions.has(ev.mint)) {
-          buyToken(ev.mint, fillPct, ev.virtualSolReserves, ev.virtualTokenReserves);
+          const row = watchlist.get(ev.mint);
+          const decision = evaluateEntry(
+            {
+              mint: ev.mint,
+              fillPct,
+              history: row.history,
+              mintStats: statsFor(ev.mint),
+            },
+            filterCfg,
+          );
+          if (!decision.allow) {
+            if (isNewHigh) {
+              log(`SKIP ${ev.mint.slice(0, 12)}: ${decision.reasons.join("; ")}`);
+            }
+            analytics?.recordSkip(ev.mint, fillPct, decision.velocity, decision.reasons);
+          } else {
+            buyToken(
+              ev.mint,
+              fillPct,
+              ev.virtualSolReserves,
+              ev.virtualTokenReserves,
+              decision.velocity,
+            );
+          }
         }
       }
     } catch {}
@@ -277,6 +365,11 @@ process.on("SIGINT", () => {
   log("\nStopping.");
   log(`  Session: ${totalTrades} trades, ${wins}W/${totalTrades - wins}L`);
   log(`  PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  if (analytics) {
+    for (const { reason, count } of analytics.summary().topSkips) {
+      log(`  skip: ${count}× ${reason}`);
+    }
+  }
   log(`  Watchlist: ${watchlist.size} tokens tracked`);
   log(`  Open positions: ${positions.size}`);
   for (const [mint, pos] of positions) {

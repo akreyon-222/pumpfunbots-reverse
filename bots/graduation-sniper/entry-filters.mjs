@@ -1,0 +1,105 @@
+/**
+ * Optional pre-buy filters from watchlist history (V3 event stream).
+ * Tune via ENV; disable all with GRAD_FILTERS=0.
+ */
+
+export function readFilterConfig(env = process.env) {
+  const enabled = env.GRAD_FILTERS !== "0";
+  return {
+    enabled,
+    maxFillPct: Number(env.GRAD_MAX_FILL_PCT ?? 98.5),
+    minFillVelocityPctPerSec: Number(env.GRAD_MIN_FILL_VELOCITY ?? 0.02),
+    velocityWindowSec: Number(env.GRAD_VELOCITY_WINDOW_SEC ?? 15),
+    requireUptrendSamples: Number(env.GRAD_REQUIRE_UPTREND_SAMPLES ?? 0),
+    maxBuysPerMint: Number(env.GRAD_MAX_BUYS_PER_MINT ?? 1),
+    mintCooldownAfterSlSec: Number(env.GRAD_MINT_COOLDOWN_AFTER_SL_SEC ?? 600),
+    highFillPct: Number(env.GRAD_HIGH_FILL_PCT ?? 98),
+    highFillMinVelocity: Number(env.GRAD_HIGH_FILL_MIN_VELOCITY ?? 0.08),
+    coldStartAllow: env.GRAD_COLD_START_ALLOW !== "0",
+    minSamplesForVelocity: Number(env.GRAD_MIN_SAMPLES_FOR_VELOCITY ?? 2),
+  };
+}
+
+function samplesInWindow(history, windowSec, now = Date.now()) {
+  const cutoff = now - windowSec * 1000;
+  return history.filter((h) => h.ts >= cutoff);
+}
+
+/** fill % change per second between oldest and newest sample in window */
+export function fillVelocityPctPerSec(history, windowSec, now = Date.now()) {
+  const samples = samplesInWindow(history, windowSec, now);
+  if (samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const dt = (last.ts - first.ts) / 1000;
+  if (dt < 0.05) return null;
+  return (last.fillPct - first.fillPct) / dt;
+}
+
+export function hasUptrend(history, n) {
+  if (n <= 0 || history.length < n) return true;
+  const tail = history.slice(-n);
+  for (let i = 1; i < tail.length; i++) {
+    if (tail[i].fillPct <= tail[i - 1].fillPct) return false;
+  }
+  return true;
+}
+
+/**
+ * @param {object} ctx
+ * @param {string} ctx.mint
+ * @param {number} ctx.fillPct
+ * @param {{ fillPct: number, vSol: number, ts: number }[]} ctx.history
+ * @param {{ buys: number, lastSlAt?: number }} ctx.mintStats
+ * @param {ReturnType<typeof readFilterConfig>} cfg
+ */
+export function evaluateEntry(ctx, cfg) {
+  const now = ctx.now ?? Date.now();
+  if (!cfg.enabled) {
+    return {
+      allow: true,
+      velocity: fillVelocityPctPerSec(ctx.history, cfg.velocityWindowSec, now),
+      reasons: [],
+    };
+  }
+
+  const reasons = [];
+  const velocity = fillVelocityPctPerSec(ctx.history, cfg.velocityWindowSec, now);
+
+  if (ctx.mintStats.buys >= cfg.maxBuysPerMint) {
+    reasons.push(`max_buys_per_mint=${cfg.maxBuysPerMint}`);
+  }
+
+  if (ctx.mintStats.lastSlAt && Date.now() - ctx.mintStats.lastSlAt < cfg.mintCooldownAfterSlSec * 1000) {
+    reasons.push(`mint_cooldown_after_sl=${cfg.mintCooldownAfterSlSec}s`);
+  }
+
+  const windowSamples = samplesInWindow(ctx.history, cfg.velocityWindowSec, now);
+  const velocityReady = windowSamples.length >= cfg.minSamplesForVelocity && velocity !== null;
+
+  if (ctx.fillPct > cfg.maxFillPct && velocityReady && velocity < cfg.highFillMinVelocity) {
+    reasons.push(`fill>${cfg.maxFillPct}% low momentum vel=${velocity.toFixed(3)}`);
+  }
+
+  if (
+    ctx.fillPct >= cfg.highFillPct &&
+    velocityReady &&
+    velocity < cfg.highFillMinVelocity
+  ) {
+    reasons.push(`high_fill_slow_ramp vel=${velocity.toFixed(3)}<%${cfg.highFillMinVelocity}`);
+  }
+
+  if (cfg.minFillVelocityPctPerSec > 0) {
+    if (velocityReady && velocity < cfg.minFillVelocityPctPerSec) {
+      reasons.push(`fill_velocity=${velocity.toFixed(3)} < ${cfg.minFillVelocityPctPerSec}`);
+    } else if (!velocityReady && cfg.coldStartAllow === false) {
+      reasons.push("insufficient_watch_history");
+    }
+  }
+
+  if (cfg.requireUptrendSamples > 0 && !hasUptrend(ctx.history, cfg.requireUptrendSamples)) {
+    reasons.push(`uptrend_last_${cfg.requireUptrendSamples}_samples`);
+  }
+
+  return { allow: reasons.length === 0, velocity, reasons };
+}
