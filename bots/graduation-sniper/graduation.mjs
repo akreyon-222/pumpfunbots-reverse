@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../../lib/sim-guard.mjs";
 // Graduation Sniper: покупает токены перед graduation (миграцией с bonding curve на PumpSwap AMM)
 //
 // Стратегия: мониторит bonding curve reserves из V3 trade events.
@@ -14,11 +15,15 @@
 // Конфиг через ENV или .env:
 //   GRAD_BUY_SOL=0.1              — сумма покупки
 //   GRAD_MIN_FILL_PCT=92          — минимальный % заполнения для покупки
-//   GRAD_TAKE_PROFIT=1.5          — продать при 1.5x
+//   GRAD_TAKE_PROFIT=1.5          — продать при 1.5x (legacy single TP)
+//   GRAD_TP2=1.6                  — tiered: enable partial exits + TP2
+//   GRAD_TP1=1.2 / GRAD_TP1_FRACTION=0.5 — tiered first take
 //   GRAD_STOP_LOSS=0.7            — стоп-лосс при 0.7x
 //   GRAD_TIMEOUT_SEC=300          — таймаут позиции (5 мин)
 //   GRAD_MAX_POSITIONS=3          — макс. позиций
 //   GRAD_COOLDOWN_SEC=30          — пауза между покупками
+//   GRAD_FILTERS=1                — watchlist momentum / re-entry filters (see entry-filters.mjs)
+//   GRAD_ANALYTICS_CSV=...        — session CSV (default in --dry-run)
 
 import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -43,53 +48,75 @@ import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
 import { loadKeypair } from "../../lib/wallet.mjs";
 import { SolanaWs } from "../../lib/ws.mjs";
+import {
+  parseV3TradeEvent,
+  getFillPct,
+  VIRTUAL_SOL_AT_GRADUATION,
+} from "./v3-parse.mjs";
+import { SIMULATION_ONLY, logUtcPlus3 } from "../../lib/sim-guard.mjs";
+import { readFilterConfig, evaluateEntry } from "./entry-filters.mjs";
+import { SessionAnalytics } from "./session-analytics.mjs";
+import {
+  readExitConfig,
+  createPosition,
+  legPnlSol,
+  classifyTrade,
+  decideTieredExit,
+  decidePullbackFloorExit,
+  EPS,
+} from "./exit-strategy.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
-const TAKE_PROFIT = Number(process.env.GRAD_TAKE_PROFIT || 1.5);
-const STOP_LOSS = Number(process.env.GRAD_STOP_LOSS || 0.7);
-const TIMEOUT_SEC = Number(process.env.GRAD_TIMEOUT_SEC || 300);
+const exitCfg = readExitConfig();
+const TAKE_PROFIT = exitCfg.takeProfit;
+const STOP_LOSS = exitCfg.stopLoss;
+const TIMEOUT_SEC = exitCfg.timeoutSec;
 const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const POLL_MS = 3000;
 const DRY_RUN = process.argv.includes("--dry-run");
-
-const VIRTUAL_SOL_AT_GRADUATION = 85_000_000_000n;
+const filterCfg = readFilterConfig();
+const analyticsCsv =
+  process.env.GRAD_ANALYTICS_CSV ||
+  (DRY_RUN ? "/opt/cursor/artifacts/graduation-session.csv" : "");
+const analytics = analyticsCsv ? new SessionAnalytics(analyticsCsv) : null;
 
 const wallet = loadKeypair();
 const positions = new Map();
 const watchlist = new Map();
+const mintStats = new Map();
 let lastBuyTime = 0;
+
+function statsFor(mint) {
+  if (!mintStats.has(mint)) mintStats.set(mint, { buys: 0, lastSlAt: 0 });
+  return mintStats.get(mint);
+}
+
+function pushWatchSample(mint, fillPct, virtualSolReserves) {
+  const now = Date.now();
+  const vSol = Number(virtualSolReserves) / 1e9;
+  let row = watchlist.get(mint);
+  if (!row) {
+    row = { fillPct, vSol, ts: now, history: [] };
+    watchlist.set(mint, row);
+  }
+  row.fillPct = fillPct;
+  row.vSol = vSol;
+  row.ts = now;
+  row.history.push({ fillPct, vSol, ts: now });
+  if (row.history.length > 40) row.history.shift();
+}
 let totalPnl = 0;
 let totalTrades = 0;
 let wins = 0;
 
 function log(msg) {
-  console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
+  const tag = SIMULATION_ONLY ? "PAPER" : "LIVE";
+  logUtcPlus3(tag, msg);
 }
 
-function parseV3TradeEvent(data) {
-  if (data.length < 129) return null;
-  const mint = new PublicKey(data.subarray(8, 40)).toBase58();
-  const solAmount = Number(data.readBigUInt64LE(40)) / 1e9;
-  const tokenAmount = Number(data.readBigUInt64LE(48)) / 1e6;
-  const user = new PublicKey(data.subarray(57, 89)).toBase58();
-  const virtualSolReserves = data.readBigUInt64LE(97);
-  const virtualTokenReserves = data.readBigUInt64LE(105);
-  const realSolReserves = data.readBigUInt64LE(113);
-  const realTokenReserves = data.readBigUInt64LE(121);
-  return {
-    mint, solAmount, tokenAmount, user,
-    virtualSolReserves, virtualTokenReserves,
-    realSolReserves, realTokenReserves,
-  };
-}
-
-function getFillPct(virtualSolReserves) {
-  return (Number(virtualSolReserves) / Number(VIRTUAL_SOL_AT_GRADUATION)) * 100;
-}
-
-async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves) {
+async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves, velocity = null) {
   if (positions.size >= MAX_POSITIONS) return;
   if (positions.has(mint)) return;
   if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
@@ -99,11 +126,28 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves)
 
   log(`*** PRE-GRADUATION BUY ***`);
   log(`  mint: ${mint}`);
-  log(`  fill: ${fillPct.toFixed(1)}% | price: ${entryPrice.toFixed(12)} SOL/token`);
+  log(
+    `  fill: ${fillPct.toFixed(1)}% | vel=${velocity !== null ? `${velocity.toFixed(3)}%/s` : "n/a"} | price: ${entryPrice.toFixed(12)} SOL/token`,
+  );
   log(`  buying ${BUY_SOL} SOL`);
 
+  const st = statsFor(mint);
+  st.buys++;
+
   if (DRY_RUN) {
-    positions.set(mint, { entryPrice, entryTime: Date.now(), fillAtEntry: fillPct });
+    positions.set(
+      mint,
+      createPosition(
+        {
+          entryPrice,
+          entryTime: Date.now(),
+          fillAtEntry: fillPct,
+          velocityAtEntry: velocity,
+        },
+        exitCfg,
+      ),
+    );
+    analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  [DRY RUN] position tracked`);
     return;
@@ -126,12 +170,71 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves)
     ];
     const tx = await buildVersionedTx(wallet, ixs);
     await sendTxWithRetry(tx, { skipPreflight: true });
-    positions.set(mint, { entryPrice, entryTime: Date.now(), fillAtEntry: fillPct });
+    positions.set(
+      mint,
+      createPosition(
+        {
+          entryPrice,
+          entryTime: Date.now(),
+          fillAtEntry: fillPct,
+          velocityAtEntry: velocity,
+        },
+        exitCfg,
+      ),
+    );
+    analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
     lastBuyTime = Date.now();
     log(`  bought!`);
   } catch (err) {
     log(`  buy failed: ${err.message}`);
   }
+}
+
+function holdSec(pos) {
+  return ((Date.now() - pos.entryTime) / 1000).toFixed(1);
+}
+
+async function paperSellLeg(mint, pos, fraction, pnlMult, exitType) {
+  const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
+  const pnlSol = legPnlSol(BUY_SOL, fraction, pnlMult);
+  pos.tradePnlSol += pnlSol;
+  pos.remainingFraction -= fraction;
+  pos.legs.push({ exitType, pnl: pnlSol, fraction, pnlMult });
+  totalPnl += pnlSol;
+  analytics?.recordSell(
+    mint,
+    pos.fillAtEntry,
+    pos.velocityAtEntry,
+    pnlPct,
+    exitType,
+    holdSec(pos),
+    `fraction=${fraction};pnl_sol=${pnlSol.toFixed(6)}`,
+  );
+  log(
+    `  [DRY RUN] leg ${exitType}: ${fraction * 100}% @ ${pnlMult.toFixed(3)}x ` +
+      `(${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`,
+  );
+}
+
+function closePaperTrade(mint, pos) {
+  const tradeWin = pos.tradePnlSol > EPS;
+  totalTrades++;
+  if (tradeWin) wins++;
+  const tradeClass = classifyTrade(pos.legs);
+  analytics?.recordTradeClose(mint, pos.fillAtEntry, pos.tradePnlSol, tradeClass);
+  if (
+    pos.legs?.some((l) =>
+      ["stop_loss", "tp1_floor", "floor_pullback"].includes(l.exitType),
+    )
+  ) {
+    statsFor(mint).lastSlAt = Date.now();
+  }
+  log(
+    `  [DRY RUN] trade closed: ${tradeClass} total=${pos.tradePnlSol >= 0 ? "+" : ""}${pos.tradePnlSol.toFixed(4)} SOL ` +
+      `(${tradeWin ? "W" : "L"})`,
+  );
+  log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  positions.delete(mint);
 }
 
 async function checkExit(mint) {
@@ -155,28 +258,100 @@ async function checkExit(mint) {
 
     const currentPrice = getPrice(state);
     const pnlMult = currentPrice / pos.entryPrice;
+    pos.lastPnlMult = pnlMult;
+    pos.lastObservedAt = Date.now();
+
+    if (exitCfg.tiered) {
+      if (!DRY_RUN) return;
+      const decision = decideTieredExit(pos, pnlMult, elapsed, {
+        ...exitCfg,
+        stopLoss: STOP_LOSS,
+        timeoutSec: TIMEOUT_SEC,
+      });
+      if (!decision) return;
+      if (decision.action === "tp1") {
+        log(`  ${mint.slice(0, 12)}: TP1 ${exitCfg.tp1}x — sell ${(decision.fraction * 100).toFixed(0)}%`);
+        await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, "tp1");
+        pos.tp1Done = true;
+        return;
+      }
+      if (decision.exitType === "tp1_floor") {
+        log(
+          `  ${mint.slice(0, 12)}: floor protect <${exitCfg.tp1}x — sell rest @ ${decision.pnlMult.toFixed(3)}x`,
+        );
+      } else if (decision.exitType === "tp2") {
+        log(`  ${mint.slice(0, 12)}: TP2 ${exitCfg.tp2}x — sell rest`);
+      } else if (decision.exitType === "stop_loss") {
+        log(`  ${mint.slice(0, 12)}: SL ${STOP_LOSS}x${pos.tp1Done ? " on remainder" : ""}`);
+      } else if (decision.exitType === "timeout") {
+        log(
+          `  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s, mult=${decision.pnlMult.toFixed(3)}x`,
+        );
+      }
+      await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, decision.exitType);
+      if (decision.action === "close") closePaperTrade(mint, pos);
+      return;
+    }
+
+    if (exitCfg.pullbackFloor) {
+      if (!DRY_RUN) return;
+      const decision = decidePullbackFloorExit(pos, pnlMult, elapsed, {
+        ...exitCfg,
+        stopLoss: STOP_LOSS,
+        timeoutSec: TIMEOUT_SEC,
+      });
+      if (!decision) return;
+      if (decision.action === "arm_only") {
+        if (!pos.sawAboveArm) {
+          pos.sawAboveArm = true;
+          log(`  ${mint.slice(0, 12)}: floor arm >${exitCfg.floorArmLevel}x (pullback exit<=${exitCfg.floorExitLevel}x)`);
+        }
+        return;
+      }
+      const labels = {
+        take_profit: `TP ${TAKE_PROFIT}x full`,
+        floor_pullback: `floor pullback @ ${decision.pnlMult.toFixed(3)}x`,
+        stop_loss: `SL ${STOP_LOSS}x`,
+        timeout: `timeout ${elapsed.toFixed(0)}s`,
+      };
+      log(`  ${mint.slice(0, 12)}: ${labels[decision.exitType] || decision.exitType}`);
+      await paperSellLeg(mint, pos, decision.fraction, decision.pnlMult, decision.exitType);
+      closePaperTrade(mint, pos);
+      return;
+    }
 
     if (pnlMult >= TAKE_PROFIT) {
       log(`  ${mint.slice(0, 12)}: TP hit ${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "take_profit");
     } else if (pnlMult <= STOP_LOSS) {
       log(`  ${mint.slice(0, 12)}: SL hit ${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "stop_loss");
     } else if (elapsed >= TIMEOUT_SEC) {
       log(`  ${mint.slice(0, 12)}: timeout ${elapsed.toFixed(0)}s, pnl=${((pnlMult - 1) * 100).toFixed(1)}%`);
-      await sellPosition(mint, mintPk, pos, pnlMult);
+      await sellPosition(mint, mintPk, pos, pnlMult, "timeout");
     }
   } catch {}
 }
 
-async function sellPosition(mint, mintPk, pos, pnlMult) {
+async function sellPosition(mint, mintPk, pos, pnlMult, exitType = "unknown") {
   const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
   const pnlSol = BUY_SOL * (pnlMult - 1);
+  const hold = holdSec(pos);
 
   if (DRY_RUN) {
     totalTrades++;
     totalPnl += pnlSol;
-    if (pnlMult > 1) wins++;
+    if (pnlSol > EPS) wins++;
+    if (pnlMult <= STOP_LOSS) statsFor(mint).lastSlAt = Date.now();
+    analytics?.recordSell(
+      mint,
+      pos.fillAtEntry,
+      pos.velocityAtEntry,
+      pnlPct,
+      exitType,
+      hold,
+    );
+    analytics?.recordTradeClose(mint, pos.fillAtEntry, pnlSol, exitType);
     log(`  [DRY RUN] sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
     log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
     positions.delete(mint);
@@ -228,9 +403,32 @@ setInterval(monitorPositions, POLL_MS);
 
 // Main
 log("=== GRADUATION SNIPER ===");
-log(`Wallet: ${wallet.publicKey.toBase58()}`);
-log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
+log(`commit=${process.env.GIT_SHA || "local"} source=${process.env.RPC_URL || "https://api.mainnet-beta.solana.com"}`);
+log(`Wallet: ${wallet.publicKey.toBase58()}${SIMULATION_ONLY ? " (ephemeral dummy, unfunded)" : ""}`);
+if (exitCfg.tiered) {
+  log(
+    `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
+      `TP1=${exitCfg.tp1}x@${(exitCfg.tp1Fraction * 100).toFixed(0)}% TP2=${exitCfg.tp2}x rest, ` +
+      `afterTP1 floor<${exitCfg.tp1}x${exitCfg.floorProtect ? " on" : " off"}, ` +
+      `SL=${STOP_LOSS}x pre-TP1, timeout=${TIMEOUT_SEC}s`,
+  );
+} else if (exitCfg.pullbackFloor) {
+  log(
+    `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
+      `TP=${TAKE_PROFIT}x full, arm>${exitCfg.floorArmLevel}x pullback<=${exitCfg.floorExitLevel}x, ` +
+      `SL=${STOP_LOSS}x if never armed, timeout=${TIMEOUT_SEC}s`,
+  );
+} else {
+  log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x, timeout=${TIMEOUT_SEC}s`);
+}
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s`);
+if (filterCfg.enabled) {
+  log(
+    `Filters: maxFill=${filterCfg.maxFillPct}% minVel=${filterCfg.minFillVelocityPctPerSec}%/s ` +
+      `highFill>=${filterCfg.highFillPct}% needVel=${filterCfg.highFillMinVelocity} maxBuys/mint=${filterCfg.maxBuysPerMint}`,
+  );
+} else log("Filters: off (GRAD_FILTERS=0)");
+if (analyticsCsv) log(`Analytics CSV: ${analyticsCsv}`);
 if (DRY_RUN) log("MODE: DRY RUN (no real transactions)");
 
 const ws = new SolanaWs();
@@ -263,13 +461,37 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
 
       if (fillPct >= MIN_FILL_PCT && fillPct < 100) {
         const prev = watchlist.get(ev.mint);
-        if (!prev || fillPct > prev.fillPct) {
-          watchlist.set(ev.mint, { fillPct, ts: Date.now() });
+        const isNewHigh = !prev || fillPct > prev.fillPct;
+        pushWatchSample(ev.mint, fillPct, ev.virtualSolReserves);
+        if (isNewHigh) {
           log(`WATCHLIST: ${ev.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% vSol=${(Number(ev.virtualSolReserves) / 1e9).toFixed(2)}`);
         }
 
         if (!positions.has(ev.mint)) {
-          buyToken(ev.mint, fillPct, ev.virtualSolReserves, ev.virtualTokenReserves);
+          const row = watchlist.get(ev.mint);
+          const decision = evaluateEntry(
+            {
+              mint: ev.mint,
+              fillPct,
+              history: row.history,
+              mintStats: statsFor(ev.mint),
+            },
+            filterCfg,
+          );
+          if (!decision.allow) {
+            if (isNewHigh) {
+              log(`SKIP ${ev.mint.slice(0, 12)}: ${decision.reasons.join("; ")}`);
+            }
+            analytics?.recordSkip(ev.mint, fillPct, decision.velocity, decision.reasons);
+          } else {
+            buyToken(
+              ev.mint,
+              fillPct,
+              ev.virtualSolReserves,
+              ev.virtualTokenReserves,
+              decision.velocity,
+            );
+          }
         }
       }
     } catch {}
@@ -291,10 +513,16 @@ process.on("SIGINT", () => {
   log("\nStopping.");
   log(`  Session: ${totalTrades} trades, ${wins}W/${totalTrades - wins}L`);
   log(`  PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  if (analytics) {
+    for (const { reason, count } of analytics.summary().topSkips) {
+      log(`  skip: ${count}× ${reason}`);
+    }
+  }
   log(`  Watchlist: ${watchlist.size} tokens tracked`);
   log(`  Open positions: ${positions.size}`);
   for (const [mint, pos] of positions) {
-    log(`    ${mint.slice(0, 12)} fill@entry=${pos.fillAtEntry.toFixed(1)}%`);
+    const mult = pos.lastPnlMult != null ? ` last_mult=${pos.lastPnlMult.toFixed(3)}x` : "";
+    log(`    ${mint.slice(0, 12)} fill@entry=${pos.fillAtEntry.toFixed(1)}%${mult}`);
   }
   ws.close();
   process.exit(0);
