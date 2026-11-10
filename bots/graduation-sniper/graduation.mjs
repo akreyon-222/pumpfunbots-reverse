@@ -71,6 +71,7 @@ import {
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
 const AB_COMPARE = process.env.GRAD_AB_COMPARE === "1";
+const AB_STOP_LOSS = process.env.GRAD_STOP_LOSS || "0.7";
 const exitCfg = AB_COMPARE ? null : readExitConfig();
 const abCfgTiered = AB_COMPARE
   ? readExitConfig({
@@ -78,7 +79,7 @@ const abCfgTiered = AB_COMPARE
       GRAD_TP2: "1.6",
       GRAD_TP1: "1.2",
       GRAD_TP1_FRACTION: "0.5",
-      GRAD_STOP_LOSS: "0.7",
+      GRAD_STOP_LOSS: AB_STOP_LOSS,
       GRAD_TP1_FLOOR_PROTECT: "0",
     })
   : null;
@@ -88,11 +89,11 @@ const abCfgSimple = AB_COMPARE
       GRAD_TP2: "",
       GRAD_FLOOR_ARM: "",
       GRAD_TAKE_PROFIT: "1.4",
-      GRAD_STOP_LOSS: "0.75",
+      GRAD_STOP_LOSS: AB_STOP_LOSS,
     })
   : null;
 const TAKE_PROFIT = AB_COMPARE ? abCfgSimple.takeProfit : exitCfg.takeProfit;
-const STOP_LOSS = AB_COMPARE ? abCfgTiered.stopLoss : exitCfg.stopLoss;
+const STOP_LOSS = AB_COMPARE ? abCfgSimple.stopLoss : exitCfg.stopLoss;
 const TIMEOUT_SEC = AB_COMPARE ? abCfgTiered.timeoutSec : exitCfg.timeoutSec;
 const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
