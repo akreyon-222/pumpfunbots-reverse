@@ -88,6 +88,21 @@ export function decideTieredExit(pos, pnlMult, elapsedSec, cfg) {
  * Single full-position exit with armed pullback floor.
  * Arm when pnlMult > floorArmLevel (strict). Exit floor when armed and pnlMult <= floorExitLevel.
  */
+/** Legacy single full exit (GRAD_TAKE_PROFIT / GRAD_STOP_LOSS, no tiered/floor). */
+export function decideLegacyExit(pos, pnlMult, elapsedSec, cfg) {
+  if (pos.remainingFraction != null && pos.remainingFraction <= EPS) return null;
+  if (pnlMult >= cfg.takeProfit) {
+    return { action: "close", fraction: 1, exitType: "take_profit", pnlMult };
+  }
+  if (pnlMult <= cfg.stopLoss) {
+    return { action: "close", fraction: 1, exitType: "stop_loss", pnlMult };
+  }
+  if (elapsedSec >= cfg.timeoutSec) {
+    return { action: "close", fraction: 1, exitType: "timeout", pnlMult };
+  }
+  return null;
+}
+
 export function decidePullbackFloorExit(pos, pnlMult, elapsedSec, cfg) {
   if (pnlMult >= cfg.takeProfit) {
     return { action: "close", fraction: 1, exitType: "take_profit", pnlMult };

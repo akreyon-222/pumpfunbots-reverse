@@ -63,15 +63,36 @@ import {
   classifyTrade,
   decideTieredExit,
   decidePullbackFloorExit,
+  decideLegacyExit,
   EPS,
 } from "./exit-strategy.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
-const exitCfg = readExitConfig();
-const TAKE_PROFIT = exitCfg.takeProfit;
-const STOP_LOSS = exitCfg.stopLoss;
-const TIMEOUT_SEC = exitCfg.timeoutSec;
+const AB_COMPARE = process.env.GRAD_AB_COMPARE === "1";
+const exitCfg = AB_COMPARE ? null : readExitConfig();
+const abCfgTiered = AB_COMPARE
+  ? readExitConfig({
+      ...process.env,
+      GRAD_TP2: "1.6",
+      GRAD_TP1: "1.2",
+      GRAD_TP1_FRACTION: "0.5",
+      GRAD_STOP_LOSS: "0.7",
+      GRAD_TP1_FLOOR_PROTECT: "0",
+    })
+  : null;
+const abCfgSimple = AB_COMPARE
+  ? readExitConfig({
+      ...process.env,
+      GRAD_TP2: "",
+      GRAD_FLOOR_ARM: "",
+      GRAD_TAKE_PROFIT: "1.4",
+      GRAD_STOP_LOSS: "0.75",
+    })
+  : null;
+const TAKE_PROFIT = AB_COMPARE ? abCfgSimple.takeProfit : exitCfg.takeProfit;
+const STOP_LOSS = AB_COMPARE ? abCfgTiered.stopLoss : exitCfg.stopLoss;
+const TIMEOUT_SEC = AB_COMPARE ? abCfgTiered.timeoutSec : exitCfg.timeoutSec;
 const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const POLL_MS = 3000;
@@ -110,6 +131,20 @@ function pushWatchSample(mint, fillPct, virtualSolReserves) {
 let totalPnl = 0;
 let totalTrades = 0;
 let wins = 0;
+const abStats = AB_COMPARE
+  ? {
+      tiered: { pnl: 0, trades: 0, wins: 0 },
+      simple: { pnl: 0, trades: 0, wins: 0 },
+    }
+  : null;
+
+function createShadowPos(entry, cfg) {
+  const pos = createPosition(entry, cfg);
+  if (!cfg.tiered && !cfg.pullbackFloor) {
+    return { ...pos, remainingFraction: 1, tradePnlSol: 0, legs: [] };
+  }
+  return pos;
+}
 
 function log(msg) {
   const tag = SIMULATION_ONLY ? "PAPER" : "LIVE";
@@ -135,21 +170,29 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
   st.buys++;
 
   if (DRY_RUN) {
-    positions.set(
-      mint,
-      createPosition(
-        {
-          entryPrice,
-          entryTime: Date.now(),
-          fillAtEntry: fillPct,
-          velocityAtEntry: velocity,
+    const entry = {
+      entryPrice,
+      entryTime: Date.now(),
+      fillAtEntry: fillPct,
+      velocityAtEntry: velocity,
+    };
+    if (AB_COMPARE) {
+      positions.set(mint, {
+        ...entry,
+        shadows: {
+          tiered: createShadowPos(entry, abCfgTiered),
+          simple: createShadowPos(entry, abCfgSimple),
         },
-        exitCfg,
-      ),
-    );
-    analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
+        closed: { tiered: false, simple: false },
+      });
+      analytics?.recordBuy(mint, fillPct, velocity, entryPrice, "ab_pair");
+      log(`  [DRY RUN] AB shadow positions (tiered + simple)`);
+    } else {
+      positions.set(mint, createPosition(entry, exitCfg));
+      analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
+      log(`  [DRY RUN] position tracked`);
+    }
     lastBuyTime = Date.now();
-    log(`  [DRY RUN] position tracked`);
     return;
   }
 
@@ -237,11 +280,125 @@ function closePaperTrade(mint, pos) {
   positions.delete(mint);
 }
 
+function shadowOpen(shadowPos) {
+  return (shadowPos.remainingFraction ?? 1) > EPS;
+}
+
+async function paperSellLegAb(mint, parent, shadowPos, label, fraction, pnlMult, exitType, cfg) {
+  const pnlPct = ((pnlMult - 1) * 100).toFixed(1);
+  const pnlSol = legPnlSol(BUY_SOL, fraction, pnlMult);
+  shadowPos.tradePnlSol += pnlSol;
+  shadowPos.remainingFraction -= fraction;
+  shadowPos.legs.push({ exitType, pnl: pnlSol, fraction, pnlMult });
+  const st = abStats[label];
+  st.pnl += pnlSol;
+  totalPnl += pnlSol;
+  analytics?.recordSell(
+    mint,
+    parent.fillAtEntry,
+    parent.velocityAtEntry,
+    pnlPct,
+    exitType,
+    holdSec(parent),
+    `fraction=${fraction};pnl_sol=${pnlSol.toFixed(6)}`,
+    label,
+  );
+  log(
+    `  [AB/${label}] leg ${exitType}: ${fraction * 100}% @ ${pnlMult.toFixed(3)}x ` +
+      `(${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`,
+  );
+}
+
+function closeShadowPaperTrade(mint, parent, label, shadowPos) {
+  const tradeWin = shadowPos.tradePnlSol > EPS;
+  const st = abStats[label];
+  st.trades++;
+  if (tradeWin) st.wins++;
+  const tradeClass = classifyTrade(shadowPos.legs);
+  analytics?.recordTradeClose(mint, parent.fillAtEntry, shadowPos.tradePnlSol, tradeClass, label);
+  if (
+    shadowPos.legs?.some((l) =>
+      ["stop_loss", "tp1_floor", "floor_pullback"].includes(l.exitType),
+    )
+  ) {
+    statsFor(mint).lastSlAt = Date.now();
+  }
+  log(
+    `  [AB/${label}] closed ${tradeClass} total=${shadowPos.tradePnlSol >= 0 ? "+" : ""}${shadowPos.tradePnlSol.toFixed(4)} SOL (${tradeWin ? "W" : "L"})`,
+  );
+  log(
+    `  [AB] session tiered: ${abStats.tiered.wins}W/${abStats.tiered.trades - abStats.tiered.wins}L PnL=${abStats.tiered.pnl >= 0 ? "+" : ""}${abStats.tiered.pnl.toFixed(4)} | ` +
+      `simple: ${abStats.simple.wins}W/${abStats.simple.trades - abStats.simple.wins}L PnL=${abStats.simple.pnl >= 0 ? "+" : ""}${abStats.simple.pnl.toFixed(4)}`,
+  );
+  parent.closed[label] = true;
+  if (label === "tiered") {
+    parent._tieredClosePnl = shadowPos.tradePnlSol;
+    parent._tieredClass = tradeClass;
+  } else {
+    parent._simpleClosePnl = shadowPos.tradePnlSol;
+    parent._simpleClass = tradeClass;
+  }
+  if (parent.closed.tiered && parent.closed.simple) {
+    analytics?.recordAbPair(
+      mint,
+      parent.fillAtEntry,
+      parent._tieredClosePnl,
+      parent._simpleClosePnl,
+      parent._tieredClass,
+      parent._simpleClass,
+    );
+    const delta = parent._simpleClosePnl - parent._tieredClosePnl;
+    log(
+      `  [AB PAIR] ${mint.slice(0, 12)} tiered=${parent._tieredClosePnl >= 0 ? "+" : ""}${parent._tieredClosePnl.toFixed(4)} ` +
+        `simple=${parent._simpleClosePnl >= 0 ? "+" : ""}${parent._simpleClosePnl.toFixed(4)} ` +
+        `Δ(simple−tiered)=${delta >= 0 ? "+" : ""}${delta.toFixed(4)} SOL`,
+    );
+    positions.delete(mint);
+  }
+}
+
+async function applyShadowExit(mint, parent, label, shadowPos, cfg, pnlMult, elapsed) {
+  if (!shadowOpen(shadowPos)) return;
+
+  if (cfg.tiered) {
+    const decision = decideTieredExit(shadowPos, pnlMult, elapsed, cfg);
+    if (!decision) return;
+    if (decision.action === "tp1") {
+      log(`  [AB/${label}] ${mint.slice(0, 12)}: TP1 ${cfg.tp1}x — sell ${(decision.fraction * 100).toFixed(0)}%`);
+      await paperSellLegAb(mint, parent, shadowPos, label, decision.fraction, decision.pnlMult, "tp1", cfg);
+      shadowPos.tp1Done = true;
+      return;
+    }
+    await paperSellLegAb(mint, parent, shadowPos, label, decision.fraction, decision.pnlMult, decision.exitType, cfg);
+    if (decision.action === "close") closeShadowPaperTrade(mint, parent, label, shadowPos);
+    return;
+  }
+
+  if (cfg.pullbackFloor) {
+    const decision = decidePullbackFloorExit(shadowPos, pnlMult, elapsed, cfg);
+    if (!decision) return;
+    if (decision.action === "arm_only") {
+      if (!shadowPos.sawAboveArm) shadowPos.sawAboveArm = true;
+      return;
+    }
+    await paperSellLegAb(mint, parent, shadowPos, label, decision.fraction, decision.pnlMult, decision.exitType, cfg);
+    closeShadowPaperTrade(mint, parent, label, shadowPos);
+    return;
+  }
+
+  const decision = decideLegacyExit(shadowPos, pnlMult, elapsed, cfg);
+  if (!decision) return;
+  log(`  [AB/${label}] ${mint.slice(0, 12)}: ${decision.exitType} @ ${pnlMult.toFixed(3)}x`);
+  await paperSellLegAb(mint, parent, shadowPos, label, decision.fraction, decision.pnlMult, decision.exitType, cfg);
+  closeShadowPaperTrade(mint, parent, label, shadowPos);
+}
+
 async function checkExit(mint) {
   const pos = positions.get(mint);
   if (!pos) return;
 
   const mintPk = new PublicKey(mint);
+  const entryPrice = pos.entryPrice;
   const elapsed = (Date.now() - pos.entryTime) / 1000;
 
   try {
@@ -257,9 +414,16 @@ async function checkExit(mint) {
     }
 
     const currentPrice = getPrice(state);
-    const pnlMult = currentPrice / pos.entryPrice;
+    const pnlMult = currentPrice / entryPrice;
     pos.lastPnlMult = pnlMult;
     pos.lastObservedAt = Date.now();
+
+    if (AB_COMPARE && pos.shadows) {
+      if (!DRY_RUN) return;
+      await applyShadowExit(mint, pos, "tiered", pos.shadows.tiered, abCfgTiered, pnlMult, elapsed);
+      await applyShadowExit(mint, pos, "simple", pos.shadows.simple, abCfgSimple, pnlMult, elapsed);
+      return;
+    }
 
     if (exitCfg.tiered) {
       if (!DRY_RUN) return;
@@ -405,7 +569,14 @@ setInterval(monitorPositions, POLL_MS);
 log("=== GRADUATION SNIPER ===");
 log(`commit=${process.env.GIT_SHA || "local"} source=${process.env.RPC_URL || "https://api.mainnet-beta.solana.com"}`);
 log(`Wallet: ${wallet.publicKey.toBase58()}${SIMULATION_ONLY ? " (ephemeral dummy, unfunded)" : ""}`);
-if (exitCfg.tiered) {
+if (AB_COMPARE) {
+  log("MODE: AB compare — shared entries, twin paper exits");
+  log(
+    `  A/tiered: TP1=${abCfgTiered.tp1}x@${(abCfgTiered.tp1Fraction * 100).toFixed(0)}% TP2=${abCfgTiered.tp2}x SL=${abCfgTiered.stopLoss}x pre-TP1 floor=off`,
+  );
+  log(`  B/simple: TP=${abCfgSimple.takeProfit}x SL=${abCfgSimple.stopLoss}x full exit`);
+  log(`  buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, timeout=${TIMEOUT_SEC}s`);
+} else if (exitCfg.tiered) {
   log(
     `Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, ` +
       `TP1=${exitCfg.tp1}x@${(exitCfg.tp1Fraction * 100).toFixed(0)}% TP2=${exitCfg.tp2}x rest, ` +
@@ -511,8 +682,19 @@ setInterval(() => {
 
 process.on("SIGINT", () => {
   log("\nStopping.");
-  log(`  Session: ${totalTrades} trades, ${wins}W/${totalTrades - wins}L`);
-  log(`  PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  if (AB_COMPARE && abStats) {
+    log(`  AB pairs closed: tiered ${abStats.tiered.trades} | simple ${abStats.simple.trades}`);
+    log(
+      `  Tiered: ${abStats.tiered.wins}W/${abStats.tiered.trades - abStats.tiered.wins}L PnL=${abStats.tiered.pnl >= 0 ? "+" : ""}${abStats.tiered.pnl.toFixed(4)} SOL`,
+    );
+    log(
+      `  Simple: ${abStats.simple.wins}W/${abStats.simple.trades - abStats.simple.wins}L PnL=${abStats.simple.pnl >= 0 ? "+" : ""}${abStats.simple.pnl.toFixed(4)} SOL`,
+    );
+    log(`  Combined leg PnL (tiered+simple stacks): ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL — not one wallet; use per-strategy lines above`);
+  } else {
+    log(`  Session: ${totalTrades} trades, ${wins}W/${totalTrades - wins}L`);
+    log(`  PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+  }
   if (analytics) {
     for (const { reason, count } of analytics.summary().topSkips) {
       log(`  skip: ${count}× ${reason}`);
