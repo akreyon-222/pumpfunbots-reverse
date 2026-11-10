@@ -21,7 +21,11 @@ const GIT_SHA = (() => {
   }
 })();
 
-const stamp = "30m-ab-tiered-vs-tp1.4";
+const runIndex = Number(process.env.PAPER_AB_RUN || 0);
+const stamp =
+  runIndex >= 1
+    ? `30m-ab-tiered-vs-tp1.4-run${String(runIndex).padStart(2, "0")}`
+    : "30m-ab-tiered-vs-tp1.4";
 const logPath = path.join(ARTIFACT_DIR, `graduation-paper-observe-${stamp}.log`);
 const csvPath = path.join(ARTIFACT_DIR, `graduation-session-${stamp}.csv`);
 const metaPath = path.join(ARTIFACT_DIR, `graduation-paper-meta-${stamp}.json`);
@@ -30,6 +34,8 @@ fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
 
 const meta = {
   mode: "PAPER_AB_COMPARE",
+  batchRunIndex: runIndex >= 1 ? runIndex : 1,
+  batchId: process.env.PAPER_AB_BATCH_ID || "ab-tiered-vs-tp14-batch1",
   durationSec: DURATION_SEC,
   commit: GIT_SHA,
   strategies: {
