@@ -41,6 +41,7 @@ import {
   calcBuyTokens,
   calcSellSol,
   getBondingCurveState,
+  getBondingCurveCreator,
   getPrice,
   sellIx,
 } from "../../lib/pumpfun.mjs";
@@ -107,11 +108,40 @@ const wallet = loadKeypair();
 const positions = new Map();
 const watchlist = new Map();
 const mintStats = new Map();
+const creatorStats = new Map();
 let lastBuyTime = 0;
 
 function statsFor(mint) {
   if (!mintStats.has(mint)) mintStats.set(mint, { buys: 0, lastSlAt: 0 });
   return mintStats.get(mint);
+}
+
+function creatorStatsFor(creator) {
+  if (!creator) return { slTokens: 0, tokens: 0 };
+  if (!creatorStats.has(creator)) creatorStats.set(creator, { slTokens: 0, tokens: 0 });
+  return creatorStats.get(creator);
+}
+
+function noteCreatorSl(creator) {
+  if (!creator) return;
+  const st = creatorStatsFor(creator);
+  st.slTokens++;
+}
+
+async function resolveCreator(mint, row) {
+  if (row?.creator) return row.creator;
+  if (row?.creatorFailed) return null;
+  try {
+    const creator = await getBondingCurveCreator(mint);
+    if (row) {
+      row.creator = creator;
+      if (!creator) row.creatorFailed = true;
+    }
+    return creator;
+  } catch {
+    if (row) row.creatorFailed = true;
+    return null;
+  }
 }
 
 function pushWatchSample(mint, fillPct, virtualSolReserves) {
@@ -151,7 +181,7 @@ function log(msg) {
   logUtcPlus3(tag, msg);
 }
 
-async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves, velocity = null) {
+async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves, velocity = null, creator = null) {
   if (positions.size >= MAX_POSITIONS) return;
   if (positions.has(mint)) return;
   if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
@@ -168,6 +198,7 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
 
   const st = statsFor(mint);
   st.buys++;
+  if (creator) creatorStatsFor(creator).tokens++;
 
   if (DRY_RUN) {
     const entry = {
@@ -175,6 +206,7 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
       entryTime: Date.now(),
       fillAtEntry: fillPct,
       velocityAtEntry: velocity,
+      creator,
     };
     if (AB_COMPARE) {
       positions.set(mint, {
@@ -185,12 +217,12 @@ async function buyToken(mint, fillPct, virtualSolReserves, virtualTokenReserves,
         },
         closed: { tiered: false, simple: false },
       });
-      analytics?.recordBuy(mint, fillPct, velocity, entryPrice, "ab_pair");
-      log(`  [DRY RUN] AB shadow positions (tiered + simple)`);
+      analytics?.recordBuy(mint, fillPct, velocity, entryPrice, creator ? `ab_pair;creator=${creator}` : "ab_pair");
+      log(`  [DRY RUN] AB shadow positions (tiered + simple)${creator ? ` creator=${creator.slice(0, 8)}` : ""}`);
     } else {
-      positions.set(mint, createPosition(entry, exitCfg));
-      analytics?.recordBuy(mint, fillPct, velocity, entryPrice);
-      log(`  [DRY RUN] position tracked`);
+      positions.set(mint, { ...createPosition(entry, exitCfg), creator });
+      analytics?.recordBuy(mint, fillPct, velocity, entryPrice, creator ? `creator=${creator}` : "");
+      log(`  [DRY RUN] position tracked${creator ? ` creator=${creator.slice(0, 8)}` : ""}`);
     }
     lastBuyTime = Date.now();
     return;
@@ -271,6 +303,7 @@ function closePaperTrade(mint, pos) {
     )
   ) {
     statsFor(mint).lastSlAt = Date.now();
+    noteCreatorSl(pos.creator);
   }
   log(
     `  [DRY RUN] trade closed: ${tradeClass} total=${pos.tradePnlSol >= 0 ? "+" : ""}${pos.tradePnlSol.toFixed(4)} SOL ` +
@@ -322,6 +355,10 @@ function closeShadowPaperTrade(mint, parent, label, shadowPos) {
     )
   ) {
     statsFor(mint).lastSlAt = Date.now();
+    if (!parent.creatorSlNoted) {
+      parent.creatorSlNoted = true;
+      noteCreatorSl(parent.creator);
+    }
   }
   log(
     `  [AB/${label}] closed ${tradeClass} total=${shadowPos.tradePnlSol >= 0 ? "+" : ""}${shadowPos.tradePnlSol.toFixed(4)} SOL (${tradeWin ? "W" : "L"})`,
@@ -595,8 +632,13 @@ if (AB_COMPARE) {
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s`);
 if (filterCfg.enabled) {
   log(
-    `Filters: maxFill=${filterCfg.maxFillPct}% minVel=${filterCfg.minFillVelocityPctPerSec}%/s ` +
-      `highFill>=${filterCfg.highFillPct}% needVel=${filterCfg.highFillMinVelocity} maxBuys/mint=${filterCfg.maxBuysPerMint}`,
+    `Filters: fill ${MIN_FILL_PCT}–${filterCfg.hardMaxFillPct ?? "open"}% ` +
+      `softMax=${filterCfg.maxFillPct}% minVel=${filterCfg.minFillVelocityPctPerSec}%/s ` +
+      `coldStart=${filterCfg.coldStartAllow ? "allow" : "block"} ` +
+      `highFill>=${filterCfg.highFillPct}% needVel=${filterCfg.highFillMinVelocity} maxBuys/mint=${filterCfg.maxBuysPerMint}` +
+      (filterCfg.creatorFilter
+        ? ` creatorDeny=${filterCfg.creatorDenylist.size} sessionSlSkip=${filterCfg.creatorSessionSlSkip}`
+        : " creatorFilter=off"),
   );
 } else log("Filters: off (GRAD_FILTERS=0)");
 if (analyticsCsv) log(`Analytics CSV: ${analyticsCsv}`);
@@ -606,6 +648,10 @@ const ws = new SolanaWs();
 await ws.connect();
 
 ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
+  void onPumpLog(result);
+});
+
+async function onPumpLog(result) {
   const { value } = result;
   if (!value?.logs) return;
 
@@ -640,12 +686,18 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
 
         if (!positions.has(ev.mint)) {
           const row = watchlist.get(ev.mint);
+          let creator = row.creator ?? null;
+          if (filterCfg.creatorFilter && !creator && !row.creatorFailed) {
+            creator = await resolveCreator(ev.mint, row);
+          }
           const decision = evaluateEntry(
             {
               mint: ev.mint,
               fillPct,
               history: row.history,
               mintStats: statsFor(ev.mint),
+              creator,
+              creatorStats: creatorStatsFor(creator),
             },
             filterCfg,
           );
@@ -655,12 +707,13 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
             }
             analytics?.recordSkip(ev.mint, fillPct, decision.velocity, decision.reasons);
           } else {
-            buyToken(
+            await buyToken(
               ev.mint,
               fillPct,
               ev.virtualSolReserves,
               ev.virtualTokenReserves,
               decision.velocity,
+              creator,
             );
           }
         }
@@ -668,7 +721,7 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
     } catch {}
     break;
   }
-});
+}
 
 log("\nListening for near-graduation tokens...\n");
 
