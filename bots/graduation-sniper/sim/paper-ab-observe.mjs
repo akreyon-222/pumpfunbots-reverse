@@ -22,11 +22,14 @@ const GIT_SHA = (() => {
 })();
 
 const runIndex = Number(process.env.PAPER_AB_RUN || 0);
+const stampPrefix = process.env.PAPER_AB_STAMP_PREFIX || "";
 const stamp =
   process.env.PAPER_AB_STAMP ||
-  (runIndex >= 1
-    ? `30m-ab-tiered-vs-tp1.4-run${String(runIndex).padStart(2, "0")}`
-    : "30m-ab-tiered-vs-tp1.4");
+  (stampPrefix && runIndex >= 1
+    ? `${stampPrefix}-run${String(runIndex).padStart(2, "0")}`
+    : runIndex >= 1
+      ? `30m-ab-tiered-vs-tp1.4-run${String(runIndex).padStart(2, "0")}`
+      : "30m-ab-tiered-vs-tp1.4");
 const logPath = path.join(ARTIFACT_DIR, `graduation-paper-observe-${stamp}.log`);
 const csvPath = path.join(ARTIFACT_DIR, `graduation-session-${stamp}.csv`);
 const metaPath = path.join(ARTIFACT_DIR, `graduation-paper-meta-${stamp}.json`);
@@ -40,8 +43,17 @@ const meta = {
   durationSec: DURATION_SEC,
   commit: GIT_SHA,
   strategies: {
-    tiered: { GRAD_TP1: 1.2, GRAD_TP1_FRACTION: 0.5, GRAD_TP2: 1.6, GRAD_STOP_LOSS: 0.7, GRAD_TP1_FLOOR_PROTECT: 0 },
-    simple: { GRAD_TAKE_PROFIT: 1.4, GRAD_STOP_LOSS: 0.75 },
+    tiered: {
+      GRAD_TP1: 1.2,
+      GRAD_TP1_FRACTION: 0.5,
+      GRAD_TP2: 1.6,
+      GRAD_STOP_LOSS: Number(process.env.GRAD_STOP_LOSS || 0.7),
+      GRAD_TP1_FLOOR_PROTECT: 0,
+    },
+    simple: {
+      GRAD_TAKE_PROFIT: 1.4,
+      GRAD_STOP_LOSS: Number(process.env.GRAD_STOP_LOSS || process.env.GRAD_STOP_LOSS_SIMPLE || 0.75),
+    },
   },
   shared: {
     SIMULATION_ONLY: 1,
