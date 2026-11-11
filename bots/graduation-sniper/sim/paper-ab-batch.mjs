@@ -26,6 +26,8 @@ const GIT_SHA = (() => {
 })();
 
 function stampForRun(i) {
+  const prefix = process.env.PAPER_AB_STAMP_PREFIX;
+  if (prefix) return `${prefix}-run${String(i).padStart(2, "0")}`;
   return i === 1 && !fs.existsSync(path.join(ARTIFACT_DIR, "graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run01.json"))
     ? "30m-ab-tiered-vs-tp1.4"
     : `30m-ab-tiered-vs-tp1.4-run${String(i).padStart(2, "0")}`;
