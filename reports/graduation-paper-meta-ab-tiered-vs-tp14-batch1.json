@@ -1,0 +1,119 @@
+{
+  "batchId": "ab-tiered-vs-tp14-batch1",
+  "commit": "f9c160e86159fcdb6baef60564cccae5248ea5f5",
+  "runs": [
+    {
+      "runIndex": 1,
+      "stamp": "30m-ab-tiered-vs-tp1.4",
+      "startedAtUtcPlus3": "2026-11-10T10:28:15.672+03:00",
+      "endedAtUtcPlus3": "2026-11-10T10:58:15.927+03:00",
+      "tiered": {
+        "wins": 6,
+        "losses": 20,
+        "pnlSol": -0.3784
+      },
+      "simple": {
+        "wins": 9,
+        "losses": 20,
+        "pnlSol": -0.2975
+      },
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4.csv",
+      "abPairsComplete": 26,
+      "abPairMintWinner": {
+        "simple": 5,
+        "tiered": 4,
+        "tie": 17
+      }
+    },
+    {
+      "runIndex": 2,
+      "stamp": "30m-ab-tiered-vs-tp1.4-run02",
+      "startedAtUtcPlus3": "2026-11-10T11:28:43.839+03:00",
+      "endedAtUtcPlus3": "2026-11-10T11:58:44.056+03:00",
+      "tiered": {
+        "wins": 7,
+        "losses": 23,
+        "pnlSol": -0.3941
+      },
+      "simple": {
+        "wins": 7,
+        "losses": 24,
+        "pnlSol": -0.4189
+      },
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run02.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4-run02.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4-run02.csv"
+    },
+    {
+      "runIndex": 3,
+      "stamp": "30m-ab-tiered-vs-tp1.4-run03",
+      "startedAtUtcPlus3": "2026-11-10T11:58:44.766+03:00",
+      "endedAtUtcPlus3": "2026-11-10T12:28:44.985+03:00",
+      "tiered": {
+        "wins": 10,
+        "losses": 17,
+        "pnlSol": -0.0854
+      },
+      "simple": {
+        "wins": 9,
+        "losses": 19,
+        "pnlSol": -0.0731
+      },
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run03.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4-run03.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4-run03.csv"
+    },
+    {
+      "runIndex": 4,
+      "stamp": "30m-ab-tiered-vs-tp1.4-run04",
+      "startedAtUtcPlus3": "2026-11-10T12:28:46.635+03:00",
+      "endedAtUtcPlus3": "2026-11-10T12:58:47.393+03:00",
+      "tiered": {
+        "wins": 10,
+        "losses": 13,
+        "pnlSol": 0.3654
+      },
+      "simple": {
+        "wins": 11,
+        "losses": 12,
+        "pnlSol": 0.3796
+      },
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run04.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4-run04.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4-run04.csv"
+    },
+    {
+      "runIndex": 5,
+      "stamp": "30m-ab-tiered-vs-tp1.4-run05",
+      "startedAtUtcPlus3": "2026-11-10T12:58:48.093+03:00",
+      "endedAtUtcPlus3": "2026-11-10T12:58:48.804+03:00",
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run05.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4-run05.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4-run05.csv"
+    },
+    {
+      "runIndex": 6,
+      "stamp": "30m-ab-tiered-vs-tp1.4-run06",
+      "startedAtUtcPlus3": "2026-11-10T12:58:49.364+03:00",
+      "endedAtUtcPlus3": "2026-11-10T13:28:49.578+03:00",
+      "tiered": {
+        "wins": 10,
+        "losses": 11,
+        "pnlSol": 0.5369
+      },
+      "simple": {
+        "wins": 8,
+        "losses": 13,
+        "pnlSol": 0.3515
+      },
+      "metaPath": "/opt/cursor/artifacts/graduation-paper-meta-30m-ab-tiered-vs-tp1.4-run06.json",
+      "logPath": "/opt/cursor/artifacts/graduation-paper-observe-30m-ab-tiered-vs-tp1.4-run06.log",
+      "csvPath": "/opt/cursor/artifacts/graduation-session-30m-ab-tiered-vs-tp1.4-run06.csv"
+    }
+  ],
+  "note": "Runs 2-6 in progress via paper-ab-batch.mjs",
+  "batchStartedAtUtcPlus3": "2026-11-10T11:28:43.075+03:00",
+  "batchEndedAtUtcPlus3": "2026-11-10T13:28:52.444+03:00"
+}

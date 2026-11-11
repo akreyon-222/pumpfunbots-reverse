@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>A/B Batch — 6×30 dk karşılaştırma</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --tiered: #5b9fd4;
+      --simple: #6bcf7f;
+      --warn: #e8a54b;
+      --bad: #e85d5d;
+      --good: #6bcf7f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 1.5rem;
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+    }
+    .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.5rem; }
+    .card .val { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .card .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.35rem; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+  th, td { padding: 0.65rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: #243044; color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    tr:last-child td { border-bottom: none; }
+    tr.fail td { opacity: 0.85; background: rgba(232, 93, 93, 0.08); }
+    .num { font-variant-numeric: tabular-nums; }
+    .pnl-pos { color: var(--good); }
+    .pnl-neg { color: var(--bad); }
+    .tag {
+      display: inline-block;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      background: #2d3a4f;
+      color: var(--muted);
+    }
+    .tag.warn { background: rgba(232, 165, 75, 0.2); color: var(--warn); }
+    .bars { margin-top: 1.5rem; }
+    .bar-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.65rem; font-size: 0.85rem; }
+    .bar-label { width: 3rem; color: var(--muted); }
+    .bar-track { flex: 1; height: 22px; background: #243044; border-radius: 4px; overflow: hidden; display: flex; }
+    .bar-t { background: var(--tiered); height: 100%; min-width: 2px; }
+    .bar-s { background: var(--simple); height: 100%; min-width: 2px; }
+    .legend { display: flex; gap: 1.25rem; margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); }
+    .legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 0.35rem; vertical-align: middle; }
+    .legend .lt::before { background: var(--tiered); }
+    .legend .ls::before { background: var(--simple); }
+    .note {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      border-left: 3px solid var(--warn);
+      background: rgba(232, 165, 75, 0.08);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 2rem; font-size: 0.8rem; color: var(--muted); }
+    a { color: var(--tiered); }
+  </style>
+</head>
+<body>
+  <h1>Graduation Sniper — A/B kağıt batch raporu</h1>
+  <p class="sub">
+    <strong>6×30 dk</strong> aynı giriş, iki gölge çıkış · Europe/Istanbul (UTC+3) ·
+    <code>SIMULATION_ONLY</code> · commit <code>f9c160e</code>
+  </p>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Geçerli oturum (5/6)</h2>
+      <div class="val">~2,5 saat</div>
+      <div class="hint">Run 5 başarısız (WS 413)</div>
+    </div>
+    <div class="card">
+      <h2>Toplam kapanmış PnL — tiered</h2>
+      <div class="val pnl-pos">+0,0444 SOL</div>
+      <div class="hint">5 geçerli koşu toplamı</div>
+    </div>
+    <div class="card">
+      <h2>Toplam kapanmış PnL — simple</h2>
+      <div class="val pnl-neg">−0,0584 SOL</div>
+      <div class="hint">Δ toplam (S−T): −0,1028 SOL</div>
+    </div>
+    <div class="card">
+      <h2>Oturum bazında önde</h2>
+      <div class="val">Simple 3 · Tiered 2</div>
+      <h2 style="margin-top:0.75rem">Mint çifti (127)</h2>
+      <div class="hint">Simple 30 · Tiered 27 · Berabere 70</div>
+    </div>
+  </section>
+
+  <h2 style="font-size:1rem; margin-bottom:0.75rem;">Ayarlar</h2>
+  <table>
+    <thead>
+      <tr><th>Strateji</th><th>Çıkış</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong style="color:var(--tiered)">A — Tiered</strong></td>
+        <td>TP1 1,2× (%50) + TP2 1,6× · SL 0,7 (TP1 öncesi) · floor kapalı</td>
+      </tr>
+      <tr>
+        <td><strong style="color:var(--simple)">B — Simple</strong></td>
+        <td>TP 1,4× tam çıkış · SL 0,75</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size:1rem; margin:1.5rem 0 0.75rem;">Oturum özeti</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Başlangıç</th>
+        <th>Bitiş</th>
+        <th>Tiered PnL</th>
+        <th>Simple PnL</th>
+        <th>Δ (S−T)</th>
+        <th>W/L (T)</th>
+        <th>W/L (S)</th>
+        <th>AB çift</th>
+        <th>Çift: S / T / =</th>
+        <th>WS err</th>
+        <th>Durum</th>
+      </tr>
+    </thead>
+    <tbody id="runs"></tbody>
+  </table>
+
+  <div class="bars card" style="margin-top:1.5rem">
+    <h2 style="margin-top:0">Oturum PnL (geçerli koşular)</h2>
+    <div id="barChart"></div>
+    <div class="legend">
+      <span class="lt">Tiered</span>
+      <span class="ls">Simple</span>
+      <span>Çubuklar mutlak değere göre ölçekli (max |PnL|)</span>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Run 5:</strong> Başlangıçta <code>Unexpected server response: 413</code> — WebSocket el sıkışması kesildi; süre ~1 sn, <strong>işlem yok</strong>.
+    Karşılaştırma <strong>5 geçerli oturum</strong> + Run 5 “başarısız” satırı üzerinden yapıldı.<br><br>
+    Kağıt mod: slip, Jito, PumpSwap ve gerçek ücretler yok. Farklı saat pencereleri — tek bir stratejinin “daha iyi” olduğu sonucu çıkarılmamalıdır.
+  </div>
+
+  <footer>
+    Manifest: <code>graduation-paper-meta-ab-tiered-vs-tp14-batch1.json</code> ·
+    CSV/log: <code>graduation-*-30m-ab-tiered-vs-tp1.4*.csv</code>
+  </footer>
+
+  <script>
+    const runs = [
+      { i:1, ok:true, start:"2026-11-10 10:28", end:"10:58", t:-0.3784, s:-0.2975, tw:6, tl:20, sw:9, sl:20, pairs:26, ps:5, pt:4, pe:17, ws:0 },
+      { i:2, ok:true, start:"2026-11-10 11:28", end:"11:58", t:-0.3941, s:-0.4189, tw:7, tl:23, sw:7, sl:24, pairs:30, ps:4, pt:5, pe:21, ws:1 },
+      { i:3, ok:true, start:"2026-11-10 11:58", end:"12:28", t:-0.0854, s:-0.0731, tw:10, tl:17, sw:9, sl:19, pairs:27, ps:7, pt:5, pe:15, ws:2 },
+      { i:4, ok:true, start:"2026-11-10 12:28", end:"12:58", t:0.3654, s:0.3796, tw:10, tl:13, sw:11, sl:12, pairs:23, ps:7, pt:5, pe:11, ws:0 },
+      { i:5, ok:false, start:"2026-11-10 12:58", end:"12:58", t:null, s:null, tw:null, tl:null, sw:null, sl:null, pairs:0, ps:0, pt:0, pe:0, ws:1 },
+      { i:6, ok:true, start:"2026-11-10 12:58", end:"13:28", t:0.5369, s:0.3515, tw:10, tl:11, sw:8, sl:13, pairs:21, ps:7, pt:8, pe:6, ws:0 },
+    ];
+
+    function fmtPnl(x) {
+      if (x == null) return "—";
+      const sign = x >= 0 ? "+" : "";
+      return sign + x.toFixed(4).replace(".", ",");
+    }
+    function pnlClass(x) {
+      if (x == null) return "";
+      return x >= 0 ? "pnl-pos" : "pnl-neg";
+    }
+
+    const tbody = document.getElementById("runs");
+    for (const r of runs) {
+      const d = r.ok ? r.s - r.t : null;
+      const tr = document.createElement("tr");
+      if (!r.ok) tr.className = "fail";
+      const winner = r.ok ? (d > 1e-6 ? '<span class="tag" style="color:var(--simple)">Simple</span>' : d < -1e-6 ? '<span class="tag" style="color:var(--tiered)">Tiered</span>' : '<span class="tag">Berabere</span>') : '<span class="tag warn">HATA</span>';
+      tr.innerHTML = `
+        <td><strong>${r.i}</strong></td>
+        <td class="num">${r.start}</td>
+        <td class="num">${r.end}</td>
+        <td class="num ${pnlClass(r.t)}">${fmtPnl(r.t)}</td>
+        <td class="num ${pnlClass(r.s)}">${fmtPnl(r.s)}</td>
+        <td class="num ${pnlClass(d)}">${fmtPnl(d)}</td>
+        <td class="num">${r.ok ? r.tw + "W/" + r.tl + "L" : "—"}</td>
+        <td class="num">${r.ok ? r.sw + "W/" + r.sl + "L" : "—"}</td>
+        <td class="num">${r.pairs}</td>
+        <td class="num">${r.ok ? r.ps + " / " + r.pt + " / " + r.pe : "—"}</td>
+        <td class="num">${r.ws}</td>
+        <td>${winner}</td>`;
+      tbody.appendChild(tr);
+    }
+
+    const valid = runs.filter(r => r.ok);
+    const maxAbs = Math.max(...valid.flatMap(r => [Math.abs(r.t), Math.abs(r.s)]), 0.01);
+    const chart = document.getElementById("barChart");
+    for (const r of valid) {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+      const tw = (Math.abs(r.t) / maxAbs) * 50;
+      const sw = (Math.abs(r.s) / maxAbs) * 50;
+      row.innerHTML = `
+        <span class="bar-label">R${r.i}</span>
+        <div class="bar-track">
+          <div class="bar-t" style="width:${tw}%" title="Tiered ${fmtPnl(r.t)}"></div>
+          <span style="width:4px"></span>
+          <div class="bar-s" style="width:${sw}%" title="Simple ${fmtPnl(r.s)}"></div>
+        </div>
+        <span class="num" style="width:10rem;color:var(--muted)">T ${fmtPnl(r.t)} · S ${fmtPnl(r.s)}</span>`;
+      chart.appendChild(row);
+    }
+  </script>
+</body>
+</html>

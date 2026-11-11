@@ -1,0 +1,163 @@
+{
+  "sourceCsv": "/opt/cursor/artifacts/launch-observe-60m-launch-observe-1.csv",
+  "rule": "n>=3 AND dump10>=3 AND dumpRate>=0.5 (SNAP_60 buys>0, creator sell<=10s)",
+  "generatedAtUtcPlus3": "2026-11-11T16:57:59.602+03:00",
+  "creators": [
+    "4L69zf2AD3jEJVYuYrC4kbPMMVLsi9aKwBctFveiTFsp",
+    "7Ry5Z7Ufk7aPVHbe7u3x1g76BaxGsYCQfJQ7PuX5MiMQ",
+    "38qy9n81zMDWKVJsQY1hjps8qPScGPL45VFAhxWgBrs7",
+    "AtGUUwakZ3pqTiWD4oCo7e9y8TxNEGmNW7qc2g7t1yem",
+    "88md4Q8bwUjx1VHXqwMMqn5Xyhwvc3Mf8KMm3txBFnHF",
+    "CU56CvjVKuQm34oMAhZ5hPtXaFC3cY7WCN1hB3t5aqnn",
+    "aSWCaHZajgo2F5UVdzngMUimCPxiR7WrZ2nP71QtE39",
+    "A3LoBMohwTUxsnpZtAYWzPcZVR5oPAoxj3WWmkdjDzXC",
+    "FozyChx6dHe5ySokvayDA25vr5r7RMNPncSMRmmzDPuv",
+    "K6Eh9fwKkrhVNq6SpRtJn7F4Myi3HUst5QP8x5BKHnR",
+    "61sZ9zry53pAnd7XGYWkeyLhdE5weDFjGRRYRsnvvftH",
+    "Aq5VmrXFd7kMpQubG8TYytusQui2gKp7V3YTuZyHNcMG",
+    "2RocAkHszj2VvaKEzPQEA6dx6QayK1sFoktHL5VBMUMi",
+    "B4uTafQgPDS7cRiXXV4XHTFwfhKX6H3qVFHv7Qq6mioG",
+    "45kyjKdw7AmQ8j6pCYk7DTufBL7ghMNa8QPYzG2in3e7",
+    "6wjhFZ3wHmdknscF14BgLFj4Y3KDtXgMBtGmamL18Saz",
+    "B8TBHKPQ9FsTtNcydrgrJMA3n5N8ZgGaTANwWaCYP4AA",
+    "4iPkDj7pmt1XC8DAsH1LzsWzfyXWs16doAND4PReFtZg",
+    "GQAYMxYMnxWjzFUSPxnDHTgAh9axvcfZ2UwqtMxNVNvR",
+    "Fx9ocqhwoWYHgUfXvwtf9kfxsXF8krv28zX2S7hJ36H1",
+    "FW4A2nAxGwsztHdvqRXDc8Knhcz8ESTWKkpdWqKkjcJp",
+    "76m79gc56cmPAwd2rcnkz11DnMhFpen3vigt7hzkB6rR"
+  ],
+  "detail": [
+    {
+      "creator": "4L69zf2AD3jEJVYuYrC4kbPMMVLsi9aKwBctFveiTFsp",
+      "n": 29,
+      "dump10": 16,
+      "rate": 0.552
+    },
+    {
+      "creator": "7Ry5Z7Ufk7aPVHbe7u3x1g76BaxGsYCQfJQ7PuX5MiMQ",
+      "n": 29,
+      "dump10": 15,
+      "rate": 0.517
+    },
+    {
+      "creator": "38qy9n81zMDWKVJsQY1hjps8qPScGPL45VFAhxWgBrs7",
+      "n": 24,
+      "dump10": 14,
+      "rate": 0.583
+    },
+    {
+      "creator": "AtGUUwakZ3pqTiWD4oCo7e9y8TxNEGmNW7qc2g7t1yem",
+      "n": 22,
+      "dump10": 12,
+      "rate": 0.545
+    },
+    {
+      "creator": "88md4Q8bwUjx1VHXqwMMqn5Xyhwvc3Mf8KMm3txBFnHF",
+      "n": 21,
+      "dump10": 12,
+      "rate": 0.571
+    },
+    {
+      "creator": "CU56CvjVKuQm34oMAhZ5hPtXaFC3cY7WCN1hB3t5aqnn",
+      "n": 14,
+      "dump10": 10,
+      "rate": 0.714
+    },
+    {
+      "creator": "aSWCaHZajgo2F5UVdzngMUimCPxiR7WrZ2nP71QtE39",
+      "n": 14,
+      "dump10": 9,
+      "rate": 0.643
+    },
+    {
+      "creator": "A3LoBMohwTUxsnpZtAYWzPcZVR5oPAoxj3WWmkdjDzXC",
+      "n": 13,
+      "dump10": 9,
+      "rate": 0.692
+    },
+    {
+      "creator": "FozyChx6dHe5ySokvayDA25vr5r7RMNPncSMRmmzDPuv",
+      "n": 12,
+      "dump10": 8,
+      "rate": 0.667
+    },
+    {
+      "creator": "K6Eh9fwKkrhVNq6SpRtJn7F4Myi3HUst5QP8x5BKHnR",
+      "n": 13,
+      "dump10": 7,
+      "rate": 0.538
+    },
+    {
+      "creator": "61sZ9zry53pAnd7XGYWkeyLhdE5weDFjGRRYRsnvvftH",
+      "n": 6,
+      "dump10": 6,
+      "rate": 1
+    },
+    {
+      "creator": "Aq5VmrXFd7kMpQubG8TYytusQui2gKp7V3YTuZyHNcMG",
+      "n": 10,
+      "dump10": 5,
+      "rate": 0.5
+    },
+    {
+      "creator": "2RocAkHszj2VvaKEzPQEA6dx6QayK1sFoktHL5VBMUMi",
+      "n": 5,
+      "dump10": 5,
+      "rate": 1
+    },
+    {
+      "creator": "B4uTafQgPDS7cRiXXV4XHTFwfhKX6H3qVFHv7Qq6mioG",
+      "n": 5,
+      "dump10": 5,
+      "rate": 1
+    },
+    {
+      "creator": "45kyjKdw7AmQ8j6pCYk7DTufBL7ghMNa8QPYzG2in3e7",
+      "n": 7,
+      "dump10": 4,
+      "rate": 0.571
+    },
+    {
+      "creator": "6wjhFZ3wHmdknscF14BgLFj4Y3KDtXgMBtGmamL18Saz",
+      "n": 7,
+      "dump10": 4,
+      "rate": 0.571
+    },
+    {
+      "creator": "B8TBHKPQ9FsTtNcydrgrJMA3n5N8ZgGaTANwWaCYP4AA",
+      "n": 5,
+      "dump10": 4,
+      "rate": 0.8
+    },
+    {
+      "creator": "4iPkDj7pmt1XC8DAsH1LzsWzfyXWs16doAND4PReFtZg",
+      "n": 5,
+      "dump10": 4,
+      "rate": 0.8
+    },
+    {
+      "creator": "GQAYMxYMnxWjzFUSPxnDHTgAh9axvcfZ2UwqtMxNVNvR",
+      "n": 4,
+      "dump10": 3,
+      "rate": 0.75
+    },
+    {
+      "creator": "Fx9ocqhwoWYHgUfXvwtf9kfxsXF8krv28zX2S7hJ36H1",
+      "n": 3,
+      "dump10": 3,
+      "rate": 1
+    },
+    {
+      "creator": "FW4A2nAxGwsztHdvqRXDc8Knhcz8ESTWKkpdWqKkjcJp",
+      "n": 3,
+      "dump10": 3,
+      "rate": 1
+    },
+    {
+      "creator": "76m79gc56cmPAwd2rcnkz11DnMhFpen3vigt7hzkB6rR",
+      "n": 3,
+      "dump10": 3,
+      "rate": 1
+    }
+  ]
+}

@@ -2,12 +2,50 @@
  * Optional pre-buy filters from watchlist history (V3 event stream).
  * Tune via ENV; disable all with GRAD_FILTERS=0.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+
+/** Serial dumpers from AB paper batch (100% SL, n>=3). Not a live blacklist guarantee. */
+export const DEFAULT_CREATOR_DENYLIST = [
+  "DwmFSKoZnK2zT7upEF9eJL1Gx2ZMpypGGvb7t1dBj1oB",
+  "DHvDE4oWxWFbEWyCSZ9BkYbjCmoL5dF71BuVyJqkBeL5",
+  "BSmRWzv96QAswJaTqcmJmk5o7UsCeSsdtzDH4DbfMLct",
+  "AmjvT9vh3m9VNFkqzUqNsJvxxAaQMq9dHKWB8MPepraL",
+];
+
+function parsePubkeySet(raw, extras = []) {
+  const fromEnv = String(raw || "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return new Set([...extras, ...fromEnv]);
+}
+
+export function loadCreatorDenylistFile(filePath) {
+  if (!filePath) return [];
+  if (!fs.existsSync(filePath)) return [];
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const list = Array.isArray(raw) ? raw : raw.creators;
+  return (list || []).filter((s) => typeof s === "string" && s.length >= 32);
+}
 
 export function readFilterConfig(env = process.env) {
   const enabled = env.GRAD_FILTERS !== "0";
+  const creatorFilter = env.GRAD_CREATOR_FILTER === "1";
+  const defaultFile = path.join(__dir, "config/launch-creator-denylist.json");
+  const denyFile = env.GRAD_CREATOR_DENYLIST_FILE || (creatorFilter ? defaultFile : "");
+  const seedDeny = creatorFilter
+    ? [...DEFAULT_CREATOR_DENYLIST, ...loadCreatorDenylistFile(denyFile)]
+    : [];
   return {
     enabled,
     maxFillPct: Number(env.GRAD_MAX_FILL_PCT ?? 98.5),
+    hardMaxFillPct: env.GRAD_HARD_MAX_FILL_PCT != null && String(env.GRAD_HARD_MAX_FILL_PCT).trim() !== ""
+      ? Number(env.GRAD_HARD_MAX_FILL_PCT)
+      : null,
     minFillVelocityPctPerSec: Number(env.GRAD_MIN_FILL_VELOCITY ?? 0.02),
     velocityWindowSec: Number(env.GRAD_VELOCITY_WINDOW_SEC ?? 15),
     requireUptrendSamples: Number(env.GRAD_REQUIRE_UPTREND_SAMPLES ?? 0),
@@ -17,6 +55,10 @@ export function readFilterConfig(env = process.env) {
     highFillMinVelocity: Number(env.GRAD_HIGH_FILL_MIN_VELOCITY ?? 0.08),
     coldStartAllow: env.GRAD_COLD_START_ALLOW !== "0",
     minSamplesForVelocity: Number(env.GRAD_MIN_SAMPLES_FOR_VELOCITY ?? 2),
+    creatorFilter,
+    creatorDenylist: parsePubkeySet(env.GRAD_CREATOR_DENYLIST, seedDeny),
+    creatorDenylistFile: denyFile || null,
+    creatorSessionSlSkip: Number(env.GRAD_CREATOR_SESSION_SL_SKIP ?? 2),
   };
 }
 
@@ -66,6 +108,10 @@ export function evaluateEntry(ctx, cfg) {
   const reasons = [];
   const velocity = fillVelocityPctPerSec(ctx.history, cfg.velocityWindowSec, now);
 
+  if (cfg.hardMaxFillPct != null && ctx.fillPct >= cfg.hardMaxFillPct) {
+    reasons.push(`fill>=${cfg.hardMaxFillPct}% hard_max`);
+  }
+
   if (ctx.mintStats.buys >= cfg.maxBuysPerMint) {
     reasons.push(`max_buys_per_mint=${cfg.maxBuysPerMint}`);
   }
@@ -99,6 +145,21 @@ export function evaluateEntry(ctx, cfg) {
 
   if (cfg.requireUptrendSamples > 0 && !hasUptrend(ctx.history, cfg.requireUptrendSamples)) {
     reasons.push(`uptrend_last_${cfg.requireUptrendSamples}_samples`);
+  }
+
+  if (cfg.creatorFilter) {
+    const creator = ctx.creator;
+    if (!creator) {
+      reasons.push("creator_unknown");
+    } else if (cfg.creatorDenylist.has(creator)) {
+      reasons.push(`creator_denylist=${creator.slice(0, 8)}`);
+    } else {
+      const cst = ctx.creatorStats;
+      const slN = cst?.slTokens ?? 0;
+      if (cfg.creatorSessionSlSkip > 0 && slN >= cfg.creatorSessionSlSkip) {
+        reasons.push(`creator_session_sl=${slN}>=${cfg.creatorSessionSlSkip}`);
+      }
+    }
   }
 
   return { allow: reasons.length === 0, velocity, reasons };
