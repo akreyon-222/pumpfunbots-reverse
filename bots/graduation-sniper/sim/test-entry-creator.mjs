@@ -44,6 +44,12 @@ if (deny.allow || !deny.reasons.some((r) => r.startsWith("creator_denylist"))) {
   throw new Error(`expected denylist: ${deny.reasons}`);
 }
 
+const launchDump = "4L69zf2AD3jEJVYuYrC4kbPMMVLsi9aKwBctFveiTFsp";
+const fromFile = entry({ creator: launchDump });
+if (fromFile.allow || !fromFile.reasons.some((r) => r.startsWith("creator_denylist"))) {
+  throw new Error(`expected launch denylist file hit: ${fromFile.reasons}`);
+}
+
 const unknown = entry({ creator: null });
 if (unknown.allow || !unknown.reasons.includes("creator_unknown")) {
   throw new Error("expected creator_unknown fail-closed");

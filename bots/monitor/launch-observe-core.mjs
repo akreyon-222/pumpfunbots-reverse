@@ -24,15 +24,17 @@ export function createLaunchTracker({ mint, creator, createdAt, devBuySol = 0, f
   };
 }
 
-export function applyLaunchTrade(tracker, { isBuy, user, solAmount, fillPct, now }) {
+export function applyLaunchTrade(tracker, { isBuy, isSell, user, solAmount, fillPct, now }) {
   const ageSec = (now - tracker.createdAt) / 1000;
   if (fillPct != null && !Number.isNaN(fillPct)) tracker.fillPct = fillPct;
   tracker.lastUser = user;
 
-  if (isBuy) {
+  if (isBuy === true) {
     tracker.buyCount++;
     if (user) tracker.uniqueBuyers.add(user);
-  } else {
+    return ageSec;
+  }
+  if (isSell === true) {
     tracker.sellCount++;
     if (user && user === tracker.creator && tracker.creatorFirstSellSec == null) {
       tracker.creatorFirstSellSec = ageSec;
@@ -56,7 +58,10 @@ export function dueSnapshots(tracker, now) {
 
 export function snapshotRow(tracker, ageLabelSec, now) {
   const unique = tracker.uniqueBuyers.size;
-  const dump10 = tracker.creatorFirstSellSec != null && tracker.creatorFirstSellSec <= 10;
+  const dump10 =
+    tracker.buyCount > 0 &&
+    tracker.creatorFirstSellSec != null &&
+    tracker.creatorFirstSellSec <= 10;
   return {
     ageSec: ageLabelSec,
     fillPct: tracker.fillPct,

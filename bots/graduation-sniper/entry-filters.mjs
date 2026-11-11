@@ -2,6 +2,11 @@
  * Optional pre-buy filters from watchlist history (V3 event stream).
  * Tune via ENV; disable all with GRAD_FILTERS=0.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dir = path.dirname(fileURLToPath(import.meta.url));
 
 /** Serial dumpers from AB paper batch (100% SL, n>=3). Not a live blacklist guarantee. */
 export const DEFAULT_CREATOR_DENYLIST = [
@@ -19,10 +24,22 @@ function parsePubkeySet(raw, extras = []) {
   return new Set([...extras, ...fromEnv]);
 }
 
+export function loadCreatorDenylistFile(filePath) {
+  if (!filePath) return [];
+  if (!fs.existsSync(filePath)) return [];
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const list = Array.isArray(raw) ? raw : raw.creators;
+  return (list || []).filter((s) => typeof s === "string" && s.length >= 32);
+}
+
 export function readFilterConfig(env = process.env) {
   const enabled = env.GRAD_FILTERS !== "0";
   const creatorFilter = env.GRAD_CREATOR_FILTER === "1";
-  const seedDeny = creatorFilter ? DEFAULT_CREATOR_DENYLIST : [];
+  const defaultFile = path.join(__dir, "config/launch-creator-denylist.json");
+  const denyFile = env.GRAD_CREATOR_DENYLIST_FILE || (creatorFilter ? defaultFile : "");
+  const seedDeny = creatorFilter
+    ? [...DEFAULT_CREATOR_DENYLIST, ...loadCreatorDenylistFile(denyFile)]
+    : [];
   return {
     enabled,
     maxFillPct: Number(env.GRAD_MAX_FILL_PCT ?? 98.5),
@@ -40,6 +57,7 @@ export function readFilterConfig(env = process.env) {
     minSamplesForVelocity: Number(env.GRAD_MIN_SAMPLES_FOR_VELOCITY ?? 2),
     creatorFilter,
     creatorDenylist: parsePubkeySet(env.GRAD_CREATOR_DENYLIST, seedDeny),
+    creatorDenylistFile: denyFile || null,
     creatorSessionSlSkip: Number(env.GRAD_CREATOR_SESSION_SL_SKIP ?? 2),
   };
 }

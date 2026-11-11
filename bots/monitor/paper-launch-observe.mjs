@@ -166,14 +166,16 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
     for (const ev of trades) {
       const tr = trackers.get(ev.mint);
       if (!tr) continue;
+      if (!ev.isBuy && !ev.isSell) continue;
       applyLaunchTrade(tr, {
         isBuy: ev.isBuy,
+        isSell: ev.isSell,
         user: ev.user,
         solAmount: ev.solAmount,
         fillPct: ev.fillPct,
         now,
       });
-      if (ev.isSell && ev.user === tr.creator && tr.creatorFirstSellSec != null && tr.creatorFirstSellSec <= 10) {
+      if (ev.isSell && ev.user === tr.creator && tr.creatorFirstSellSec != null && tr.creatorFirstSellSec <= 10 && tr.buyCount > 0) {
         if (!tr._loggedDump) {
           tr._loggedDump = true;
           dump10++;
